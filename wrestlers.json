@@ -1,0 +1,17 @@
+[
+  {
+    "name": "John Cena",
+    "salaryPerShow": 5000,
+    "salaryMonthly": 15000
+  },
+  {
+    "name": "Roman Reigns",
+    "salaryPerShow": 8000,
+    "salaryMonthly": 25000
+  },
+  {
+    "name": "Seth Rollins",
+    "salaryPerShow": 6000,
+    "salaryMonthly": 18000
+  }
+]
