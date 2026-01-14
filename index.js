@@ -108,6 +108,18 @@ const showSchema = new mongoose.Schema({
 
 const Show = mongoose.model('Show', showSchema);
 
+// Schéma Championship Belt
+const beltSchema = new mongoose.Schema({
+  userId: String,
+  guildId: String,
+  federationName: String,
+  beltName: String,
+  currentChampion: { type: String, default: null }, // Nom du lutteur
+  createdAt: { type: Date, default: Date.now }
+});
+
+const Belt = mongoose.model('Belt', beltSchema);
+
 // ============================================================================
 // CONFIGURATION DES CLASSES DE FÉDÉRATION
 // ============================================================================
@@ -342,7 +354,7 @@ client.on('messageCreate', async message => {
   // COMMANDE: DRAFTER UN LUTTEUR
   // ==========================================================================
   
-  if (command === 'pick') {
+if (command === 'pick') {
     const contractType = args[0]?.toLowerCase();
     const wrestlerName = args.slice(1).join(' ');
 
@@ -361,8 +373,7 @@ client.on('messageCreate', async message => {
 
     // Recherche exacte
     let wrestler = await Wrestler.findOne({ 
-      name: new RegExp(`^${wrestlerName}$`, 'i'),
-      isDrafted: false 
+      name: new RegExp(`^${wrestlerName}$`, 'i')
     });
 
     // Si pas de match exact, recherche par similarité
@@ -392,6 +403,85 @@ client.on('messageCreate', async message => {
       }
     }
 
+    // NOUVEAU : Vérifier si le lutteur est déjà signé en exclusivité ailleurs
+    if (wrestler.isDrafted && wrestler.ownerId !== message.author.id) {
+      const ownerFed = await Federation.findOne({ 
+        userId: wrestler.ownerId, 
+        guildId: message.guild.id 
+      });
+      return message.reply(
+        `❌ **${wrestler.name}** est déjà signé en exclusivité (contrat mensuel) avec **${ownerFed?.name || 'une autre fédération'}** !`
+      );
+    }
+
+    // Appliquer les bonus de classe
+    const classConfig = CLASS_CONFIG[federation.class];
+    let salary = contractType === 'pershow' ? wrestler.salaryPerShow : wrestler.salaryMonthly;
+    const originalSalary = salary;
+    
+    if (contractType === 'pershow' && classConfig.contractBonus.pershow !== 1) {
+      salary = Math.floor(salary * classConfig.contractBonus.pershow);
+    } else if (contractType === 'monthly' && classConfig.contractBonus.monthly !== 1) {
+      salary = Math.floor(salary * classConfig.contractBonus.monthly);
+    }
+
+    if (federation.balance < salary && contractType === 'monthly') {
+      return message.reply(`Budget insuffisant ! Il te reste $${federation.balance.toLocaleString()} mais ${wrestler.name} (monthly) coûte $${salary.toLocaleString()}`);
+    }
+
+    // Calculer la date de fin de contrat (12 jours pour monthly)
+    const contractEndDate = contractType === 'monthly' 
+      ? new Date(Date.now() + 12 * 24 * 60 * 60 * 1000)
+      : null;
+
+    // NOUVEAU : Si contrat monthly, retirer le lutteur de toutes les autres fédérations (pershow uniquement)
+    if (contractType === 'monthly') {
+      const otherFederations = await Federation.find({ 
+        guildId: message.guild.id,
+        'roster.wrestlerName': wrestler.name
+      });
+
+      for (const otherFed of otherFederations) {
+        otherFed.roster = otherFed.roster.filter(w => w.wrestlerName !== wrestler.name);
+        await otherFed.save();
+      }
+
+      // Marquer comme drafté en exclusivité
+      wrestler.isDrafted = true;
+      wrestler.ownerId = message.author.id;
+      wrestler.contractType = 'monthly';
+      await wrestler.save();
+    }
+
+    // Ajouter au roster
+    federation.roster.push({
+      wrestlerId: wrestler._id,
+      wrestlerName: wrestler.name,
+      salary: salary,
+      contractType: contractType,
+      contractEndDate: contractEndDate
+    });
+
+    await federation.save();
+
+    const contractText = contractType === 'monthly' 
+      ? `📅 Written Mensuel (Exclusif)\n⏰ Expire le: ${contractEndDate.toLocaleDateString('fr-FR')}` 
+      : '📺 Per Show';
+    const bonusText = salary !== originalSalary 
+      ? `\n✨ Bonus de classe appliqué !` : '';
+    
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Lutteur Signé !')
+      .addFields(
+        { name: 'Lutteur', value: wrestler.name, inline: true },
+        { name: 'Salaire', value: `$${salary.toLocaleString()}${bonusText}`, inline: true },
+        { name: 'Contrat', value: contractText },
+        { name: 'Budget Actuel', value: `$${federation.balance.toLocaleString()}` }
+      )
+      .setColor('#2ECC71');
+
+    return message.reply({ embeds: [embed] });
+  }
     // Appliquer les bonus de classe
     const classConfig = CLASS_CONFIG[federation.class];
     let salary = contractType === 'pershow' ? wrestler.salaryPerShow : wrestler.salaryMonthly;
@@ -510,13 +600,7 @@ client.on('messageCreate', async message => {
   // COMMANDE: ANNONCER LA FIN D'UN SHOW
   // ==========================================================================
   
-  if (command === 'showend') {
-    const showNumber = parseInt(args[0]);
-
-    if (!showNumber) {
-      return message.reply('Usage: `!showend 1`');
-    }
-
+if (command === 'showend') {
     const federation = await Federation.findOne({
       userId: message.author.id,
       guildId: message.guild.id
@@ -525,6 +609,14 @@ client.on('messageCreate', async message => {
     if (!federation) {
       return message.reply('Tu n\'as pas de fédération.');
     }
+
+    // NOUVEAU : Calculer automatiquement le numéro du prochain show
+    const lastShow = await Show.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    }).sort({ showNumber: -1 });
+
+    const showNumber = lastShow ? lastShow.showNumber + 1 : 1;
 
     // Calculer le coût des contrats pershow
     const wrestlerCost = federation.roster
@@ -575,7 +667,14 @@ client.on('messageCreate', async message => {
       )
       .setColor('#E67E22');
 
-    const msg = await message.reply({ embeds: [embed] });
+    // NOUVEAU : Mentionner le rôle Bookeur
+    const bookeurRole = message.guild.roles.cache.find(r => r.name === 'Bookeur');
+    const mention = bookeurRole ? `${bookeurRole}` : '';
+
+    const msg = await message.reply({ 
+      content: mention ? `${mention} Nouveau show à noter !` : undefined,
+      embeds: [embed] 
+    });
     
     show.messageId = msg.id;
     await show.save();
@@ -679,6 +778,109 @@ client.on('messageCreate', async message => {
     return message.reply({ embeds: [embed] });
   }
 
+  if (command === 'createbelt') {
+    const beltName = args.join(' ');
+
+    if (!beltName) {
+      return message.reply('Usage: `!createbelt Nom du Titre`');
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    if (!federation) {
+      return message.reply('Tu n\'as pas de fédération.');
+    }
+
+    const existing = await Belt.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id,
+      beltName: beltName
+    });
+
+    if (existing) {
+      return message.reply('Ce titre existe déjà dans ta fédération !');
+    }
+
+    const belt = new Belt({
+      userId: message.author.id,
+      guildId: message.guild.id,
+      federationName: federation.name,
+      beltName: beltName
+    });
+
+    await belt.save();
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 Titre Créé !')
+      .addFields(
+        { name: 'Fédération', value: federation.name },
+        { name: 'Titre', value: beltName },
+        { name: 'Champion Actuel', value: 'Vacant' }
+      )
+      .setColor('#FFD700');
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // ==========================================================================
+  // COMMANDE: DÉFINIR UN CHAMPION
+  // ==========================================================================
+  
+  if (command === 'champset') {
+    const wrestlerName = args.slice(0, -1).join(' ');
+    const beltName = args[args.length - 1];
+
+    if (!wrestlerName || !beltName) {
+      return message.reply('Usage: `!champset Nom du Lutteur <nom_du_titre>`\nExemple: !champset John Cena WWE_Championship');
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    if (!federation) {
+      return message.reply('Tu n\'as pas de fédération.');
+    }
+
+    // Vérifier que le lutteur est dans le roster
+    const wrestlerInRoster = federation.roster.find(w => 
+      w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+    );
+
+    if (!wrestlerInRoster) {
+      return message.reply(`${wrestlerName} n'est pas dans ton roster !`);
+    }
+
+    // Trouver la ceinture
+    const belt = await Belt.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id,
+      beltName: beltName
+    });
+
+    if (!belt) {
+      return message.reply(`Le titre "${beltName}" n'existe pas. Crée-le avec \`!createbelt ${beltName}\``);
+    }
+
+    belt.currentChampion = wrestlerInRoster.wrestlerName;
+    await belt.save();
+
+    const embed = new EmbedBuilder()
+      .setTitle('👑 Nouveau Champion !')
+      .addFields(
+        { name: 'Titre', value: belt.beltName },
+        { name: 'Champion', value: wrestlerInRoster.wrestlerName },
+        { name: 'Fédération', value: federation.name }
+      )
+      .setColor('#FFD700');
+
+    return message.reply({ embeds: [embed] });
+  }
+
   // ==========================================================================
   // COMMANDE: JOUR DE PAYE (ADMIN)
   // ==========================================================================
@@ -757,7 +959,7 @@ if (command === 'payday') {
   }
   
    // Commande: Stats de sa fédération
-  if (command === 'fed') {
+if (command === 'fed') {
     const federation = await Federation.findOne({
       userId: message.author.id,
       guildId: message.guild.id
@@ -779,6 +981,16 @@ if (command === 'payday') {
 
     const totalShowCosts = shows.reduce((sum, s) => sum + s.showCost, 0);
 
+    // NOUVEAU : Récupérer les champions
+    const belts = await Belt.find({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    const championsText = belts.length > 0
+      ? belts.map(b => `🏆 **${b.beltName}**: ${b.currentChampion || 'Vacant'}`).join('\n')
+      : 'Aucun titre créé';
+
     const embed = new EmbedBuilder()
       .setTitle(`📈 ${federation.name}`)
       .addFields(
@@ -787,69 +999,15 @@ if (command === 'payday') {
         { name: 'Roster', value: `${federation.roster.length} lutteurs`, inline: true },
         { name: 'Shows Complétés', value: shows.length.toString(), inline: true },
         { name: 'Note Moyenne', value: avgRating > 0 ? `⭐ ${avgRating.toFixed(2)}/5` : 'N/A', inline: true },
-        { name: 'Dépenses Shows', value: `$${totalShowCosts.toLocaleString()}`, inline: true }
+        { name: 'Dépenses Shows', value: `$${totalShowCosts.toLocaleString()}`, inline: true },
+        { name: '👑 Champions', value: championsText }
       )
       .setColor('#9B59B6');
 
     message.reply({ embeds: [embed] });
   }
 
-  // Commande: Renouveler un contrat mensuel
-  if (command === 'renew') {
-    const wrestlerName = args.join(' ');
 
-    if (!wrestlerName) {
-      return message.reply('Usage: `!renew Nom du Lutteur`');
-    }
-
-    const federation = await Federation.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
-
-    if (!federation) {
-      return message.reply('Tu n\'as pas de fédération.');
-    }
-
-    const wrestlerInRoster = federation.roster.find(w => 
-      w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase() && 
-      w.contractType === 'monthly'
-    );
-
-    if (!wrestlerInRoster) {
-      return message.reply('Lutteur introuvable dans ton roster ou pas en contrat mensuel.');
-    }
-
-    const classConfig = CLASS_CONFIG[federation.class];
-    const wrestler = await Wrestler.findById(wrestlerInRoster.wrestlerId);
-    let salary = wrestler.salaryMonthly;
-    
-    if (classConfig.contractBonus.monthly) {
-      salary = Math.floor(salary * classConfig.contractBonus.monthly);
-    }
-
-    if (federation.balance < salary) {
-      return message.reply(`Budget insuffisant pour renouveler ! Coût: ${salary.toLocaleString()}`);
-    }
-
-    // Prolonger le contrat de 12 jours
-    wrestlerInRoster.contractEndDate = new Date(
-      new Date(wrestlerInRoster.contractEndDate).getTime() + 12 * 24 * 60 * 60 * 1000
-    );
-
-    await federation.save();
-
-    const embed = new EmbedBuilder()
-      .setTitle('✅ Contrat Renouvelé !')
-      .addFields(
-        { name: 'Lutteur', value: wrestlerInRoster.wrestlerName },
-        { name: 'Nouveau salaire', value: `${salary.toLocaleString()}` },
-        { name: 'Nouvelle expiration', value: new Date(wrestlerInRoster.contractEndDate).toLocaleDateString('fr-FR') }
-      )
-      .setColor('#2ECC71');
-
-    message.reply({ embeds: [embed] });
-  }
   if (command === 'upgrade') {
     const category = args[0]?.toLowerCase();
     
