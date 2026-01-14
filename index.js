@@ -9,6 +9,7 @@ console.log('ENV CHECK:', {
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const mongoose = require('mongoose');
 const https = require('https');
+const http = require('http');  
 const fs = require('fs');
 
 // ============================================================================
