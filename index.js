@@ -8,6 +8,7 @@ console.log('ENV CHECK:', {
 
 const { Client, GatewayIntentBits, EmbedBuilder } = require('discord.js');
 const mongoose = require('mongoose');
+const https = require('https');
 const fs = require('fs');
 
 // ============================================================================
@@ -30,6 +31,23 @@ const client = new Client({
 mongoose.connect(process.env.MONGODB_URI)
   .then(() => console.log('✅ Connecté à MongoDB'))
   .catch(err => console.error('❌ Erreur MongoDB:', err));
+
+// ============================================================================
+// KEEP-ALIVE POUR RENDER
+// ============================================================================
+
+function keepAlive() {
+  const url = process.env.RENDER_EXTERNAL_URL || `http://localhost:${process.env.PORT || 3000}`;
+  
+  setInterval(() => {
+    const protocol = url.startsWith('https') ? https : http;
+    protocol.get(url, (res) => {
+      console.log(`✅ Keep-alive ping: ${res.statusCode}`);
+    }).on('error', (err) => {
+      console.error('❌ Keep-alive error:', err.message);
+    });
+  }, 5 * 60 * 1000); // Toutes les 5 minutes
+}
 
 // ============================================================================
 // SCHÉMAS MONGOOSE
@@ -954,9 +972,12 @@ client.on('messageCreate', async message => {
 });
 
 const PORT = process.env.PORT || 3000;
-require('http').createServer((req, res) => {
+const server = http.createServer((req, res) => {
   res.writeHead(200);
   res.end('Bot Discord actif');
-}).listen(PORT, () => console.log(`Serveur sur le port ${PORT}`));
+}).listen(PORT, () => {
+  console.log(`🌐 Serveur sur le port ${PORT}`);
+  keepAlive(); // Démarre le keep-alive après le démarrage du serveur
+});
 
 client.login(process.env.DISCORD_TOKEN);
