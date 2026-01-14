@@ -901,8 +901,11 @@ if (command === 'payday') {
     message.reply({ embeds: [embed] });
   }
   
-   // Commande: Stats de sa fédération
-if (command === 'fed') {
+// ==========================================================================
+  // COMMANDE: STATS DE SA FÉDÉRATION
+  // ==========================================================================
+  
+  if (command === 'fed') {
     const federation = await Federation.findOne({
       userId: message.author.id,
       guildId: message.guild.id
@@ -924,7 +927,7 @@ if (command === 'fed') {
 
     const totalShowCosts = shows.reduce((sum, s) => sum + s.showCost, 0);
 
-    // NOUVEAU : Récupérer les champions
+    // Récupérer les champions
     const belts = await Belt.find({
       userId: message.author.id,
       guildId: message.guild.id
@@ -947,9 +950,8 @@ if (command === 'fed') {
       )
       .setColor('#9B59B6');
 
-    message.reply({ embeds: [embed] });
+    return message.reply({ embeds: [embed] });
   }
-
 
   if (command === 'upgrade') {
     const category = args[0]?.toLowerCase();
