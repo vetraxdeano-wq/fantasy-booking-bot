@@ -482,63 +482,6 @@ if (command === 'pick') {
 
     return message.reply({ embeds: [embed] });
   }
-    // Appliquer les bonus de classe
-    const classConfig = CLASS_CONFIG[federation.class];
-    let salary = contractType === 'pershow' ? wrestler.salaryPerShow : wrestler.salaryMonthly;
-    const originalSalary = salary;
-    
-    if (contractType === 'pershow' && classConfig.contractBonus.pershow !== 1) {
-      salary = Math.floor(salary * classConfig.contractBonus.pershow);
-    } else if (contractType === 'monthly' && classConfig.contractBonus.monthly !== 1) {
-      salary = Math.floor(salary * classConfig.contractBonus.monthly);
-    }
-
-    if (federation.balance < salary && contractType === 'monthly') {
-      return message.reply(`Budget insuffisant ! Il te reste $${federation.balance.toLocaleString()} mais ${wrestler.name} (monthly) coûte $${salary.toLocaleString()}`);
-    }
-
-    // Calculer la date de fin de contrat (12 jours pour monthly)
-    const contractEndDate = contractType === 'monthly' 
-      ? new Date(Date.now() + 12 * 24 * 60 * 60 * 1000)
-      : null;
-
-    // Ajouter au roster
-    federation.roster.push({
-      wrestlerId: wrestler._id,
-      wrestlerName: wrestler.name,
-      salary: salary,
-      contractType: contractType,
-      contractEndDate: contractEndDate
-    });
-
-    await federation.save();
-
-    // Marquer comme drafté si contrat monthly
-    if (contractType === 'monthly') {
-      wrestler.isDrafted = true;
-      wrestler.ownerId = message.author.id;
-      wrestler.contractType = 'monthly';
-      await wrestler.save();
-    }
-
-    const contractText = contractType === 'monthly' 
-      ? `📅 Written Mensuel (Exclusif)\n⏰ Expire le: ${contractEndDate.toLocaleDateString('fr-FR')}` 
-      : '📺 Per Show';
-    const bonusText = salary !== originalSalary 
-      ? `\n✨ Bonus de classe appliqué !` : '';
-    
-    const embed = new EmbedBuilder()
-      .setTitle('✅ Lutteur Signé !')
-      .addFields(
-        { name: 'Lutteur', value: wrestler.name, inline: true },
-        { name: 'Salaire', value: `$${salary.toLocaleString()}${bonusText}`, inline: true },
-        { name: 'Contrat', value: contractText },
-        { name: 'Budget Actuel', value: `$${federation.balance.toLocaleString()}` }
-      )
-      .setColor('#2ECC71');
-
-    return message.reply({ embeds: [embed] });
-  }
 
   // ==========================================================================
   // COMMANDE: VOIR SON ROSTER
