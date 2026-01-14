@@ -683,12 +683,18 @@ client.on('messageCreate', async message => {
   // COMMANDE: JOUR DE PAYE (ADMIN)
   // ==========================================================================
   
- if (command === 'payday') {
+if (command === 'payday') {
     if (!message.member.permissions.has('Administrator')) {
       return message.reply('❌ Commande réservée aux administrateurs.');
     }
 
     const federations = await Federation.find({ guildId: message.guild.id });
+    
+    // AJOUTE CETTE VÉRIFICATION ICI
+    if (federations.length === 0) {
+      return message.reply('Aucune fédération n\'existe sur ce serveur.');
+    }
+    
     const results = [];
 
     for (const fed of federations) {
