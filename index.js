@@ -2,7 +2,7 @@ require('dotenv').config({
   path: require('path').join(__dirname, '.env')
 });
 
-const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder } = require('discord.js');
+const { Client, GatewayIntentBits, EmbedBuilder, AttachmentBuilder, ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
 const mongoose = require('mongoose');
 const https = require('https');
 const http = require('http');
@@ -368,23 +368,37 @@ client.on('messageCreate', async message => {
   // COMMANDE: VOIR SON ROSTER
   // ==========================================================================
   
-  if (command === 'roster') {
-    const federation = await Federation.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
+ if (command === 'roster') {
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
 
-    if (!federation) {
-      return message.reply('Tu n\'as pas encore de fédération.');
-    }
+  if (!federation) {
+    return message.reply('Tu n\'as pas encore de fédération.');
+  }
 
-    if (federation.roster.length === 0) {
-      return message.reply('Ton roster est vide.');
-    }
+  if (federation.roster.length === 0) {
+    return message.reply('Ton roster est vide.');
+  }
 
-    const rosterText = federation.roster.map((w, i) => {
+  // Tri alphabétique
+  const sortedRoster = [...federation.roster].sort((a, b) => 
+    a.wrestlerName.localeCompare(b.wrestlerName, 'fr')
+  );
+
+  const itemsPerPage = 7;
+  const totalPages = Math.ceil(sortedRoster.length / itemsPerPage);
+  let currentPage = 0;
+
+  const generateEmbed = (page) => {
+    const start = page * itemsPerPage;
+    const end = start + itemsPerPage;
+    const pageRoster = sortedRoster.slice(start, end);
+
+    const rosterText = pageRoster.map((w, i) => {
       const signedDate = new Date(w.signedDate).toLocaleDateString('fr-FR');
-      return `**${i + 1}.** ${w.wrestlerName} - 🔒 Exclusif (Signé le ${signedDate})`;
+      return `**${start + i + 1}.** ${w.wrestlerName} - 🔒 Exclusif (Signé le ${signedDate})`;
     }).join('\n');
 
     const embed = new EmbedBuilder()
@@ -393,17 +407,82 @@ client.on('messageCreate', async message => {
       .addFields(
         { name: 'Total', value: `${federation.roster.length} lutteurs` }
       )
-      .setColor('#3498DB');
+      .setColor('#3498DB')
+      .setFooter({ text: `Page ${page + 1}/${totalPages}` });
 
     if (federation.logoUrl && fs.existsSync(federation.logoUrl)) {
       embed.setThumbnail(`attachment://logo.png`);
-      const attachment = new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' });
-      return message.reply({ embeds: [embed], files: [attachment] });
     }
 
-    return message.reply({ embeds: [embed] });
-  }
+    return embed;
+  };
 
+  const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+
+  const row = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('previous')
+        .setLabel('◀️ Précédent')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(currentPage === 0),
+      new ButtonBuilder()
+        .setCustomId('next')
+        .setLabel('Suivant ▶️')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(totalPages <= 1)
+    );
+
+  const embedMessage = await message.reply({
+    embeds: [generateEmbed(currentPage)],
+    components: totalPages > 1 ? [row] : [],
+    files: federation.logoUrl && fs.existsSync(federation.logoUrl) 
+      ? [new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' })] 
+      : []
+  });
+
+  if (totalPages <= 1) return;
+
+  const collector = embedMessage.createMessageComponentCollector({
+    time: 120000 // 2 minutes
+  });
+
+  collector.on('collect', async interaction => {
+    if (interaction.user.id !== message.author.id) {
+      return interaction.reply({ content: 'Ce n\'est pas ton roster !', ephemeral: true });
+    }
+
+    if (interaction.customId === 'previous') {
+      currentPage = Math.max(0, currentPage - 1);
+    } else if (interaction.customId === 'next') {
+      currentPage = Math.min(totalPages - 1, currentPage + 1);
+    }
+
+    const updatedRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('previous')
+          .setLabel('◀️ Précédent')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(currentPage === 0),
+        new ButtonBuilder()
+          .setCustomId('next')
+          .setLabel('Suivant ▶️')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(currentPage === totalPages - 1)
+      );
+
+    await interaction.update({
+      embeds: [generateEmbed(currentPage)],
+      components: [updatedRow]
+    });
+  });
+
+  collector.on('end', () => {
+    embedMessage.edit({ components: [] }).catch(() => {});
+  });
+}
+  
   // ==========================================================================
   // COMMANDE: ANNONCER LA FIN D'UN SHOW
   // ==========================================================================
@@ -583,54 +662,49 @@ client.on('messageCreate', async message => {
   // ==========================================================================
   
   if (command === 'setchamp') {
-    if (args.length < 2) {
-      return message.reply('Usage: `!setchamp <nom_titre> <Nom du Lutteur>`\nExemple: !setchamp WWE_Championship John Cena');
-    }
-
-    const beltName = args[0];
-    const wrestlerName = args.slice(1).join(' ');
-
-    const federation = await Federation.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
-
-    if (!federation) {
-      return message.reply('Tu n\'as pas de fédération.');
-    }
-
-    const wrestlerInRoster = federation.roster.find(w => 
-      w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
-    );
-
-    if (!wrestlerInRoster) {
-      return message.reply(`${wrestlerName} n'est pas dans ton roster !`);
-    }
-
-    const belt = await Belt.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id,
-      beltName: new RegExp(`^${beltName}$`, 'i')
-    });
-
-    if (!belt) {
-      return message.reply(`Le titre "${beltName}" n'existe pas. Crée-le avec \`!createbelt ${beltName}\``);
-    }
-
-    belt.currentChampion = wrestlerInRoster.wrestlerName;
-    await belt.save();
-
-    const embed = new EmbedBuilder()
-      .setTitle('👑 Nouveau Champion !')
-      .addFields(
-        { name: 'Titre', value: belt.beltName },
-        { name: 'Champion', value: wrestlerInRoster.wrestlerName },
-        { name: 'Fédération', value: federation.name }
-      )
-      .setColor('#FFD700');
-
-    return message.reply({ embeds: [embed] });
+  const content = args.join(' ');
+  const match = content.match(/"([^"]+)"\s+(.+)/);
+  
+  if (!match) {
+    return message.reply('Usage: `!setchamp "Nom du Titre" Nom du Lutteur`\nExemple: !setchamp "WWE Championship" John Cena');
   }
+
+  const beltName = match[1];
+  const wrestlerName = match[2];
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('Tu n\'as pas de fédération.');
+  }
+
+  const belt = await Belt.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id,
+    beltName: new RegExp(`^${beltName}$`, 'i')
+  });
+
+  if (!belt) {
+    return message.reply(`Le titre "${beltName}" n'existe pas. Crée-le avec \`!createbelt ${beltName}\``);
+  }
+
+  belt.currentChampion = wrestlerName;
+  await belt.save();
+
+  const embed = new EmbedBuilder()
+    .setTitle('👑 Nouveau Champion !')
+    .addFields(
+      { name: 'Titre', value: belt.beltName },
+      { name: 'Champion', value: wrestlerName },
+      { name: 'Fédération', value: federation.name }
+    )
+    .setColor('#FFD700');
+
+  return message.reply({ embeds: [embed] });
+}
 
   // ==========================================================================
   // COMMANDE: VOIR SA FÉDÉRATION (AMÉLIORÉE)
