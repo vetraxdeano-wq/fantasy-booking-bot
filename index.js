@@ -580,32 +580,43 @@ client.on('messageCreate', async message => {
     return message.reply('❌ Message du show introuvable. Il a peut-être été supprimé.');
   }
   
-  const votes = [];
+const votes = [];
+
+// Récupérer à nouveau le message avec toutes ses réactions
+await msg.fetch();
+
+// Parcourir tous les émojis numérotés
+for (let i = 0; i < 10; i++) {
+  const reaction = msg.reactions.cache.find(r => r.emoji.name === EMOJI_NUMBERS[i]);
   
-  // Parcourir tous les émojis numérotés
-  for (let i = 0; i < 10; i++) {
-    const reaction = msg.reactions.cache.get(EMOJI_NUMBERS[i]);
-    if (reaction) {
-      try {
-        const users = await reaction.users.fetch();
-        users.forEach(user => {
-          // Vérifier que l'utilisateur n'a pas déjà voté et que ce n'est pas un bot
-          if (!user.bot && !votes.find(v => v.userId === user.id)) {
-            votes.push({ 
-              userId: user.id, 
-              stars: STAR_VALUES[i] 
-            });
-          }
-        });
-      } catch (error) {
-        console.error(`Erreur lors de la récupération des réactions pour ${EMOJI_NUMBERS[i]}:`, error);
-      }
+  if (reaction) {
+    try {
+      // Important: fetch avec limit élevé pour récupérer tous les utilisateurs
+      const users = await reaction.users.fetch({ limit: 100 });
+      
+      console.log(`Emoji ${EMOJI_NUMBERS[i]} (${STAR_VALUES[i]}⭐): ${users.size} utilisateurs`);
+      
+      users.forEach(user => {
+        // Vérifier que l'utilisateur n'a pas déjà voté et que ce n'est pas un bot
+        if (!user.bot && !votes.find(v => v.userId === user.id)) {
+          votes.push({ 
+            userId: user.id, 
+            stars: STAR_VALUES[i] 
+          });
+          console.log(`✅ Vote ajouté: ${user.username} - ${STAR_VALUES[i]}⭐`);
+        }
+      });
+    } catch (error) {
+      console.error(`❌ Erreur lors de la récupération des réactions pour ${EMOJI_NUMBERS[i]}:`, error);
     }
   }
+}
 
-  if (votes.length === 0) {
-    return message.reply('❌ Aucun vote enregistré pour ce show.');
-  }
+console.log(`📊 Total des votes récupérés: ${votes.length}`);
+
+if (votes.length === 0) {
+  return message.reply('❌ Aucun vote enregistré pour ce show. Vérifie que des personnes (autres que le bot) ont bien réagi avec les émojis numérotés.');
+}
 
   // Calcul de la moyenne
   const totalStars = votes.reduce((sum, v) => sum + v.stars, 0);
