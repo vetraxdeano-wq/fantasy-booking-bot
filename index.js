@@ -543,69 +543,120 @@ client.on('messageCreate', async message => {
   // COMMANDE: FINALISER LES VOTES D'UN SHOW
   // ==========================================================================
   
-  if (command === 'finalize') {
-    const showNumber = parseInt(args[0]);
+ if (command === 'finalize') {
+  const showNumber = parseInt(args[0]);
 
-    if (!showNumber) {
-      return message.reply('Usage: `!finalize 1`');
-    }
-
-    const show = await Show.findOne({
-      showNumber,
-      userId: message.author.id,
-      guildId: message.guild.id,
-      isFinalized: false
-    });
-
-    if (!show) {
-      return message.reply('Show introuvable ou déjà finalisé.');
-    }
-
-    const federation = await Federation.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
-
-    const msg = await message.channel.messages.fetch(show.messageId);
-    
-    const votes = [];
-    for (let i = 0; i < 10; i++) {
-      const reaction = msg.reactions.cache.get(EMOJI_NUMBERS[i]);
-      if (reaction) {
-        const users = await reaction.users.fetch();
-        users.forEach(user => {
-          if (!user.bot && !votes.find(v => v.userId === user.id)) {
-            votes.push({ userId: user.id, stars: STAR_VALUES[i] });
-          }
-        });
-      }
-    }
-
-    if (votes.length === 0) {
-      return message.reply('Aucun vote enregistré.');
-    }
-
-    show.ratings = votes;
-    const averageRating = votes.reduce((sum, v) => sum + v.stars, 0) / votes.length;
-    show.averageRating = averageRating;
-    show.isFinalized = true;
-
-    await show.save();
-
-    const starsDisplay = getStarDisplay(averageRating);
-
-    const embed = new EmbedBuilder()
-      .setTitle(`📊 Résultats - Show #${showNumber}`)
-      .setDescription(`**${federation.name}**`)
-      .addFields(
-        { name: 'Note Finale', value: `${starsDisplay} **${averageRating.toFixed(2)}/5**`, inline: true },
-        { name: 'Votes', value: `${votes.length} personnes`, inline: true }
-      )
-      .setColor('#9B59B6');
-
-    return message.reply({ embeds: [embed] });
+  if (!showNumber) {
+    return message.reply('Usage: `!finalize <numéro>`\nExemple: !finalize 1');
   }
 
+  const show = await Show.findOne({
+    showNumber,
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!show) {
+    return message.reply(`❌ Show #${showNumber} introuvable.`);
+  }
+
+  if (show.isFinalized) {
+    return message.reply(`⚠️ Le Show #${showNumber} a déjà été finalisé !`);
+  }
+
+  if (!show.messageId) {
+    return message.reply('❌ Impossible de retrouver le message du show.');
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  let msg;
+  try {
+    msg = await message.channel.messages.fetch(show.messageId);
+  } catch (error) {
+    return message.reply('❌ Message du show introuvable. Il a peut-être été supprimé.');
+  }
+  
+  const votes = [];
+  
+  // Parcourir tous les émojis numérotés
+  for (let i = 0; i < 10; i++) {
+    const reaction = msg.reactions.cache.get(EMOJI_NUMBERS[i]);
+    if (reaction) {
+      try {
+        const users = await reaction.users.fetch();
+        users.forEach(user => {
+          // Vérifier que l'utilisateur n'a pas déjà voté et que ce n'est pas un bot
+          if (!user.bot && !votes.find(v => v.userId === user.id)) {
+            votes.push({ 
+              userId: user.id, 
+              stars: STAR_VALUES[i] 
+            });
+          }
+        });
+      } catch (error) {
+        console.error(`Erreur lors de la récupération des réactions pour ${EMOJI_NUMBERS[i]}:`, error);
+      }
+    }
+  }
+
+  if (votes.length === 0) {
+    return message.reply('❌ Aucun vote enregistré pour ce show.');
+  }
+
+  // Calcul de la moyenne
+  const totalStars = votes.reduce((sum, v) => sum + v.stars, 0);
+  const averageRating = totalStars / votes.length;
+
+  // Enregistrement dans la base de données
+  show.ratings = votes;
+  show.averageRating = averageRating;
+  show.isFinalized = true;
+
+  await show.save();
+
+  const starsDisplay = getStarDisplay(averageRating);
+
+  // Affichage détaillé des votes
+  const votesBreakdown = STAR_VALUES.map((value, i) => {
+    const count = votes.filter(v => v.stars === value).length;
+    return count > 0 ? `${EMOJI_NUMBERS[i]} (${value}⭐) : ${count} vote${count > 1 ? 's' : ''}` : null;
+  }).filter(Boolean).join('\n') || 'Aucun détail disponible';
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📊 Résultats - Show #${showNumber}`)
+    .setDescription(`**${federation.name}**\n\n✅ Show finalisé avec succès !`)
+    .addFields(
+      { name: '⭐ Note Finale', value: `${starsDisplay} **${averageRating.toFixed(2)}/5**`, inline: true },
+      { name: '🗳️ Votes', value: `${votes.length} personne${votes.length > 1 ? 's' : ''}`, inline: true },
+      { name: '\u200B', value: '\u200B', inline: true }, // Spacer
+      { name: '📈 Répartition des votes', value: votesBreakdown }
+    )
+    .setColor('#9B59B6')
+    .setFooter({ text: `Finalisé par ${message.author.username}` })
+    .setTimestamp();
+
+  // Mise à jour du message original du show
+  try {
+    const originalEmbed = msg.embeds[0];
+    const updatedEmbed = EmbedBuilder.from(originalEmbed)
+      .setColor('#2ECC71')
+      .setFields(
+        { name: 'Statut', value: '✅ Finalisé !', inline: true },
+        { name: 'Note Finale', value: `${starsDisplay} ${averageRating.toFixed(2)}/5`, inline: true },
+        { name: 'Votes', value: `${votes.length} personne${votes.length > 1 ? 's' : ''}`, inline: true }
+      );
+    
+    await msg.edit({ embeds: [updatedEmbed] });
+  } catch (error) {
+    console.error('Erreur lors de la mise à jour du message original:', error);
+  }
+
+  return message.reply({ embeds: [embed] });
+}
   // ==========================================================================
   // COMMANDE: CRÉER UN TITRE
   // ==========================================================================
