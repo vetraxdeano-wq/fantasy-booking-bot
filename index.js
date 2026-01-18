@@ -51,7 +51,6 @@ function keepAlive() {
 // SCHÉMAS MONGOOSE
 // ============================================================================
 
-// Schéma Lutteur (dynamique - créé à la volée lors du pick)
 const wrestlerSchema = new mongoose.Schema({
   name: String,
   isDrafted: { type: Boolean, default: false },
@@ -63,7 +62,6 @@ const wrestlerSchema = new mongoose.Schema({
 
 const Wrestler = mongoose.model('Wrestler', wrestlerSchema);
 
-// Schéma Fédération
 const federationSchema = new mongoose.Schema({
   userId: String,
   guildId: String,
@@ -78,7 +76,6 @@ const federationSchema = new mongoose.Schema({
 
 const Federation = mongoose.model('Federation', federationSchema);
 
-// Schéma Show
 const showSchema = new mongoose.Schema({
   showNumber: Number,
   userId: String,
@@ -93,7 +90,6 @@ const showSchema = new mongoose.Schema({
 
 const Show = mongoose.model('Show', showSchema);
 
-// Schéma Championship Belt
 const beltSchema = new mongoose.Schema({
   userId: String,
   guildId: String,
@@ -111,6 +107,16 @@ const Belt = mongoose.model('Belt', beltSchema);
 
 const STAR_VALUES = [0.5, 1, 1.5, 2, 2.5, 3, 3.5, 4, 4.5, 5];
 const EMOJI_NUMBERS = ['1️⃣', '2️⃣', '3️⃣', '4️⃣', '5️⃣', '6️⃣', '7️⃣', '8️⃣', '9️⃣', '🔟'];
+
+// ============================================================================
+// FONCTIONS UTILITAIRES
+// ============================================================================
+
+function getStarDisplay(rating) {
+  const fullStars = Math.floor(rating);
+  const hasHalfStar = (rating % 1) >= 0.5;
+  return '⭐'.repeat(fullStars) + (hasHalfStar ? '✨' : '');
+}
 
 // ============================================================================
 // ÉVÉNEMENT: BOT PRÊT
@@ -151,19 +157,11 @@ client.on('messageCreate', async message => {
       return message.reply('Tu as déjà une fédération ! Utilise `!resetfed` pour la supprimer.');
     }
 
-    // Vérifier si un logo existe
-    const logoPath = path.join(__dirname, 'logos', `${message.author.id}.png`);
-    let logoUrl = null;
-    
-    if (fs.existsSync(logoPath)) {
-      logoUrl = logoPath;
-    }
-
     const federation = new Federation({
       userId: message.author.id,
       guildId: message.guild.id,
       name,
-      logoUrl
+      logoUrl: null
     });
 
     await federation.save();
@@ -175,13 +173,68 @@ client.on('messageCreate', async message => {
         { name: 'Roster', value: '0 lutteurs' },
         { name: 'Statut', value: '✅ Prêt à drafter' }
       )
-      .setColor('#FFD700');
+      .setColor('#FFD700')
+      .setFooter({ text: 'Utilisez !setlogo pour ajouter un logo' });
 
-    if (logoUrl && fs.existsSync(logoUrl)) {
-      embed.setThumbnail(`attachment://${message.author.id}.png`);
-      const attachment = new AttachmentBuilder(logoUrl, { name: `${message.author.id}.png` });
-      return message.reply({ embeds: [embed], files: [attachment] });
+    return message.reply({ embeds: [embed] });
+  }
+
+  // ==========================================================================
+  // COMMANDE: DÉFINIR LE LOGO (ADMIN)
+  // ==========================================================================
+  
+  if (command === 'setlogo') {
+    if (!message.member.permissions.has('Administrator')) {
+      return message.reply('❌ Commande réservée aux administrateurs.');
     }
+
+    const fedName = args.join(' ');
+    
+    if (!fedName) {
+      return message.reply('Usage: `!setlogo Nom de la Fédération` (puis attache une image)');
+    }
+
+    if (!message.attachments.first()) {
+      return message.reply('❌ Tu dois attacher une image (PNG ou JPG) à ton message !');
+    }
+
+    const federation = await Federation.findOne({
+      guildId: message.guild.id,
+      name: new RegExp(`^${fedName}$`, 'i')
+    });
+
+    if (!federation) {
+      return message.reply('Fédération introuvable.');
+    }
+
+    const attachment = message.attachments.first();
+    const ext = path.extname(attachment.name);
+    
+    if (!['.png', '.jpg', '.jpeg'].includes(ext.toLowerCase())) {
+      return message.reply('❌ Format non supporté. Utilise PNG ou JPG uniquement.');
+    }
+
+    // Créer le dossier logos s'il n'existe pas
+    const logosDir = path.join(__dirname, 'logos');
+    if (!fs.existsSync(logosDir)) {
+      fs.mkdirSync(logosDir, { recursive: true });
+    }
+
+    const logoPath = path.join(logosDir, `${federation.userId}${ext}`);
+
+    // Télécharger l'image
+    const response = await fetch(attachment.url);
+    const buffer = await response.arrayBuffer();
+    fs.writeFileSync(logoPath, Buffer.from(buffer));
+
+    federation.logoUrl = logoPath;
+    await federation.save();
+
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Logo Défini !')
+      .setDescription(`Logo de **${federation.name}** mis à jour`)
+      .setThumbnail(attachment.url)
+      .setColor('#2ECC71');
 
     return message.reply({ embeds: [embed] });
   }
@@ -206,19 +259,16 @@ client.on('messageCreate', async message => {
       return message.reply(`${targetUser.username} n'a pas de fédération.`);
     }
 
-    // Libérer tous les lutteurs
     await Wrestler.updateMany(
       { ownerId: targetUser.id, guildId: message.guild.id },
       { isDrafted: false, ownerId: null, ownerFedName: null }
     );
 
-    // Supprimer les titres
     await Belt.deleteMany({
       userId: targetUser.id,
       guildId: message.guild.id
     });
 
-    // Supprimer les shows
     await Show.deleteMany({
       userId: targetUser.id,
       guildId: message.guild.id
@@ -227,6 +277,20 @@ client.on('messageCreate', async message => {
     await Federation.deleteOne({ _id: federation._id });
 
     return message.reply(`✅ Fédération de ${targetUser.username} supprimée et lutteurs libérés.`);
+  }
+
+  // ==========================================================================
+  // COMMANDE: RESET POWER RANKING (ADMIN)
+  // ==========================================================================
+  
+  if (command === 'resetpr') {
+    if (!message.member.permissions.has('Administrator')) {
+      return message.reply('❌ Commande réservée aux administrateurs.');
+    }
+
+    await Show.deleteMany({ guildId: message.guild.id });
+    
+    return message.reply('✅ Tous les shows ont été supprimés. Power Rankings réinitialisés.');
   }
 
   // ==========================================================================
@@ -249,20 +313,17 @@ client.on('messageCreate', async message => {
       return message.reply('Tu dois d\'abord créer ta fédération avec `!createfed`');
     }
 
-    // Vérifier si le lutteur existe déjà (dans ce serveur)
     let wrestler = await Wrestler.findOne({ 
       name: new RegExp(`^${wrestlerName}$`, 'i'),
       guildId: message.guild.id
     });
 
-    // Si le lutteur existe et est déjà drafté par quelqu'un d'autre
     if (wrestler && wrestler.isDrafted && wrestler.ownerId !== message.author.id) {
       return message.reply(
         `❌ **${wrestler.name}** est déjà signé en exclusivité avec **${wrestler.ownerFedName}** !`
       );
     }
 
-    // Si le lutteur n'existe pas, le créer
     if (!wrestler) {
       wrestler = new Wrestler({
         name: wrestlerName,
@@ -271,7 +332,6 @@ client.on('messageCreate', async message => {
       await wrestler.save();
     }
 
-    // Si le lutteur est déjà dans le roster
     const alreadyInRoster = federation.roster.find(w => 
       w.wrestlerName.toLowerCase() === wrestler.name.toLowerCase()
     );
@@ -280,14 +340,12 @@ client.on('messageCreate', async message => {
       return message.reply(`${wrestler.name} est déjà dans ton roster !`);
     }
 
-    // Ajouter au roster
     federation.roster.push({
       wrestlerName: wrestler.name
     });
 
     await federation.save();
 
-    // Marquer comme drafté (exclusif)
     wrestler.isDrafted = true;
     wrestler.ownerId = message.author.id;
     wrestler.ownerFedName = federation.name;
@@ -338,8 +396,8 @@ client.on('messageCreate', async message => {
       .setColor('#3498DB');
 
     if (federation.logoUrl && fs.existsSync(federation.logoUrl)) {
-      embed.setThumbnail(`attachment://${message.author.id}.png`);
-      const attachment = new AttachmentBuilder(federation.logoUrl, { name: `${message.author.id}.png` });
+      embed.setThumbnail(`attachment://logo.png`);
+      const attachment = new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' });
       return message.reply({ embeds: [embed], files: [attachment] });
     }
 
@@ -360,7 +418,6 @@ client.on('messageCreate', async message => {
       return message.reply('Tu n\'as pas de fédération.');
     }
 
-    // Calculer automatiquement le numéro du prochain show
     const lastShow = await Show.findOne({
       userId: message.author.id,
       guildId: message.guild.id
@@ -385,7 +442,6 @@ client.on('messageCreate', async message => {
       )
       .setColor('#E67E22');
 
-    // Mentionner le rôle Bookeur s'il existe
     const bookeurRole = message.guild.roles.cache.find(r => r.name === 'Bookeur');
     const mention = bookeurRole ? `${bookeurRole}` : '';
 
@@ -457,8 +513,7 @@ client.on('messageCreate', async message => {
 
     await show.save();
 
-    const starsDisplay = '⭐'.repeat(Math.floor(averageRating)) + 
-                        (averageRating % 1 >= 0.5 ? '✨' : '');
+    const starsDisplay = getStarDisplay(averageRating);
 
     const embed = new EmbedBuilder()
       .setTitle(`📊 Résultats - Show #${showNumber}`)
@@ -528,12 +583,12 @@ client.on('messageCreate', async message => {
   // ==========================================================================
   
   if (command === 'setchamp') {
+    if (args.length < 2) {
+      return message.reply('Usage: `!setchamp <nom_titre> <Nom du Lutteur>`\nExemple: !setchamp WWE_Championship John Cena');
+    }
+
     const beltName = args[0];
     const wrestlerName = args.slice(1).join(' ');
-
-    if (!beltName || !wrestlerName) {
-      return message.reply('Usage: `!setchamp <nom_titre> Nom du Lutteur`\nExemple: !setchamp WWE_Championship John Cena');
-    }
 
     const federation = await Federation.findOne({
       userId: message.author.id,
@@ -544,7 +599,6 @@ client.on('messageCreate', async message => {
       return message.reply('Tu n\'as pas de fédération.');
     }
 
-    // Vérifier que le lutteur est dans le roster
     const wrestlerInRoster = federation.roster.find(w => 
       w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
     );
@@ -553,7 +607,6 @@ client.on('messageCreate', async message => {
       return message.reply(`${wrestlerName} n'est pas dans ton roster !`);
     }
 
-    // Trouver la ceinture
     const belt = await Belt.findOne({
       userId: message.author.id,
       guildId: message.guild.id,
@@ -580,7 +633,7 @@ client.on('messageCreate', async message => {
   }
 
   // ==========================================================================
-  // COMMANDE: VOIR SA FÉDÉRATION
+  // COMMANDE: VOIR SA FÉDÉRATION (AMÉLIORÉE)
   // ==========================================================================
   
   if (command === 'fed') {
@@ -597,13 +650,23 @@ client.on('messageCreate', async message => {
       userId: message.author.id,
       guildId: message.guild.id,
       isFinalized: true
-    });
+    }).sort({ createdAt: -1 });
 
     const avgRating = shows.length > 0 
       ? shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length 
       : 0;
 
-    // Récupérer les champions
+    // 3 derniers shows
+    const recentShows = shows.slice(0, 3);
+    const showsText = recentShows.length > 0
+      ? recentShows.map(s => {
+          const date = new Date(s.createdAt).toLocaleDateString('fr-FR');
+          const stars = getStarDisplay(s.averageRating);
+          return `**Show #${s.showNumber}** - ${date}\n${stars} ${s.averageRating.toFixed(2)}/5`;
+        }).join('\n\n')
+      : 'Aucun show finalisé';
+
+    // Champions
     const belts = await Belt.find({
       userId: message.author.id,
       guildId: message.guild.id
@@ -614,25 +677,123 @@ client.on('messageCreate', async message => {
       : 'Aucun titre créé';
 
     const createdDate = new Date(federation.createdAt).toLocaleDateString('fr-FR');
+    const avgStars = getStarDisplay(avgRating);
 
     const embed = new EmbedBuilder()
-      .setTitle(`📈 ${federation.name}`)
-      .setDescription('Statistiques de ta fédération')
+      .setTitle(`${federation.name}`)
+      .setDescription(`📅 Créée le ${createdDate}`)
       .addFields(
-        { name: 'Roster', value: `${federation.roster.length} lutteurs`, inline: true },
-        { name: 'Shows Complétés', value: shows.length.toString(), inline: true },
-        { name: 'Note Moyenne', value: avgRating > 0 ? `⭐ ${avgRating.toFixed(2)}/5` : 'N/A', inline: true },
-        { name: 'Créée le', value: createdDate, inline: true },
+        { name: '🤼 Roster', value: `${federation.roster.length} lutteurs`, inline: true },
+        { name: '📺 Shows', value: `${shows.length} complétés`, inline: true },
+        { name: '⭐ Moyenne Globale', value: avgRating > 0 ? `${avgStars} ${avgRating.toFixed(2)}/5` : 'N/A', inline: true },
+        { name: '📊 Derniers Shows', value: showsText },
         { name: '👑 Champions', value: championsText }
       )
       .setColor('#9B59B6')
-      .setFooter({ text: `Propriétaire: ${message.author.username}` });
+      .setFooter({ text: `Propriétaire: ${message.author.username}` })
+      .setTimestamp();
 
     if (federation.logoUrl && fs.existsSync(federation.logoUrl)) {
-      embed.setThumbnail(`attachment://${message.author.id}.png`);
-      const attachment = new AttachmentBuilder(federation.logoUrl, { name: `${message.author.id}.png` });
+      embed.setThumbnail(`attachment://logo.png`);
+      const attachment = new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' });
       return message.reply({ embeds: [embed], files: [attachment] });
     }
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // ==========================================================================
+  // COMMANDE: POWER RANKING
+  // ==========================================================================
+  
+  if (command === 'power-ranking' || command === 'pr') {
+    const period = args[0]?.toLowerCase() || '30';
+    
+    if (!['7', '30', 'all'].includes(period)) {
+      return message.reply('Usage: `!power-ranking [7|30|all]`\nExemple: !power-ranking 7');
+    }
+
+    let dateFilter = {};
+    let periodText = '';
+
+    if (period === '7') {
+      const sevenDaysAgo = new Date();
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      dateFilter = { createdAt: { $gte: sevenDaysAgo } };
+      periodText = '7 derniers jours';
+    } else if (period === '30') {
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+      dateFilter = { createdAt: { $gte: thirtyDaysAgo } };
+      periodText = '30 derniers jours';
+    } else {
+      periodText = 'Depuis le début';
+    }
+
+    const shows = await Show.find({
+      guildId: message.guild.id,
+      isFinalized: true,
+      ...dateFilter
+    }).sort({ averageRating: -1 });
+
+    // Top 5 meilleurs shows
+    const topShows = shows.slice(0, 5);
+    const topShowsText = topShows.length > 0
+      ? topShows.map((s, i) => {
+          const stars = getStarDisplay(s.averageRating);
+          const date = new Date(s.createdAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+          return `**${i + 1}.** ${s.federationName} - Show #${s.showNumber}\n${stars} ${s.averageRating.toFixed(2)}/5 (${date})`;
+        }).join('\n\n')
+      : 'Aucun show';
+
+    // Top 3 fédérations (min 2 shows)
+    const fedStats = {};
+    
+    for (const show of shows) {
+      if (!fedStats[show.federationName]) {
+        fedStats[show.federationName] = {
+          total: 0,
+          count: 0,
+          userId: show.userId
+        };
+      }
+      fedStats[show.federationName].total += show.averageRating;
+      fedStats[show.federationName].count += 1;
+    }
+
+    const topFeds = Object.entries(fedStats)
+      .filter(([_, stats]) => stats.count >= 2)
+      .map(([name, stats]) => ({
+        name,
+        average: stats.total / stats.count,
+        count: stats.count,
+        userId: stats.userId
+      }))
+      .sort((a, b) => b.average - a.average)
+      .slice(0, 3);
+
+    const topFedsText = topFeds.length > 0
+      ? topFeds.map((f, i) => {
+          const stars = getStarDisplay(f.average);
+          return `**${i + 1}.** ${f.name}\n${stars} ${f.average.toFixed(2)}/5 (${f.count} shows)`;
+        }).join('\n\n')
+      : 'Aucune fédération (min 2 shows)';
+
+    // Stats globales
+    const totalShows = shows.length;
+    const uniqueFeds = new Set(shows.map(s => s.federationName)).size;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🏆 Power Rankings')
+      .setDescription(`**Période:** ${periodText}`)
+      .addFields(
+        { name: '📊 Stats Globales', value: `${totalShows} shows | ${uniqueFeds} fédérations actives` },
+        { name: '⭐ Top 5 Meilleurs Shows', value: topShowsText },
+        { name: '🎖️ Top 3 Fédérations', value: topFedsText }
+      )
+      .setColor('#FFD700')
+      .setFooter({ text: 'Utilisez !pr 7, !pr 30 ou !pr all' })
+      .setTimestamp();
 
     return message.reply({ embeds: [embed] });
   }
@@ -646,18 +807,14 @@ client.on('messageCreate', async message => {
       .setTitle('📖 Commandes Fantasy Booking')
       .setDescription('Liste des commandes disponibles')
       .addFields(
-        { name: '!createfed [nom]', value: 'Créer ta fédération' },
-        { name: '!pick [nom du lutteur]', value: 'Drafter un lutteur (n\'importe quel nom, devient exclusif)' },
-        { name: '!roster', value: 'Voir ton roster' },
-        { name: '!fed', value: 'Voir les stats de ta fédération' },
-        { name: '!showend', value: 'Annoncer la fin d\'un show (auto-numéroté)' },
-        { name: '!finalize [numéro]', value: 'Finaliser les votes d\'un show' },
-        { name: '!createbelt [nom]', value: 'Créer un titre de champion' },
-        { name: '!setchamp [titre] [lutteur]', value: 'Définir un champion' },
-        { name: '!resetfed [@user]', value: 'Supprimer une fédération (ADMIN)' }
+        { name: '🏢 Gestion Fédération', value: '`!createfed [nom]` - Créer\n`!fed` - Voir stats\n`!roster` - Voir roster\n`!pick [nom]` - Drafter' },
+        { name: '📺 Shows', value: '`!showend` - Terminer un show\n`!finalize [numéro]` - Finaliser votes' },
+        { name: '👑 Championnats', value: '`!createbelt [nom]` - Créer titre\n`!setchamp [titre] [lutteur]` - Définir champion' },
+        { name: '📊 Classements', value: '`!power-ranking [7|30|all]` - Voir rankings' },
+        { name: '⚙️ Admin', value: '`!setlogo [fédération]` + image\n`!resetfed [@user]`\n`!resetpr`' }
       )
       .setColor('#3498DB')
-      .setFooter({ text: 'Les lutteurs draftés sont exclusifs à ta fédération' });
+      .setFooter({ text: 'Les lutteurs draftés sont exclusifs' });
 
     return message.reply({ embeds: [embed] });
   }
