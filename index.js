@@ -376,7 +376,7 @@ const federation = new Federation({
         { name: 'Ancien Nom', value: oldName },
         { name: 'Nouveau Nom', value: newName }
       )
-      .setColor('#3498DB')
+      .setColor(federation.color)
       .setFooter({ text: 'Tous vos shows et titres ont été mis à jour' });
 
     return message.reply({ embeds: [embed] });
@@ -1682,7 +1682,7 @@ const embed = new EmbedBuilder()
         { name: '📊 Derniers Shows', value: showsText },
         { name: '👑 Champions', value: championsText }
       )
-      .setColor('#9B59B6')
+      .setColor(federation.color)
       .setFooter({ text: `Propriétaire: ${message.author.username}` })
       .setTimestamp();
 
