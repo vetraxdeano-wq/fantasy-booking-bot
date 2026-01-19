@@ -240,6 +240,53 @@ client.on('messageCreate', async message => {
   }
 
   // ==========================================================================
+  // COMMANDE: MODIFIER LE NOM DE SA FÉDÉRATION
+  // ==========================================================================
+  
+  if (command === 'editfed') {
+    const newName = args.join(' ');
+    
+    if (!newName) {
+      return message.reply('Usage: `!editfed Nouveau Nom de ta Fédération`');
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    if (!federation) {
+      return message.reply('❌ Tu n\'as pas de fédération. Utilise `!createfed` d\'abord.');
+    }
+
+    const oldName = federation.name;
+    federation.name = newName;
+    await federation.save();
+
+    // Mettre à jour les shows et belts avec le nouveau nom
+    await Show.updateMany(
+      { userId: message.author.id, guildId: message.guild.id },
+      { federationName: newName }
+    );
+
+    await Belt.updateMany(
+      { userId: message.author.id, guildId: message.guild.id },
+      { federationName: newName }
+    );
+
+    const embed = new EmbedBuilder()
+      .setTitle('✏️ Fédération Renommée !')
+      .addFields(
+        { name: 'Ancien Nom', value: oldName },
+        { name: 'Nouveau Nom', value: newName }
+      )
+      .setColor('#3498DB')
+      .setFooter({ text: 'Tous vos shows et titres ont été mis à jour' });
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // ==========================================================================
   // COMMANDE: RESET FÉDÉRATION (ADMIN)
   // ==========================================================================
   
@@ -360,6 +407,61 @@ client.on('messageCreate', async message => {
         { name: 'Roster Total', value: `${federation.roster.length} lutteurs` }
       )
       .setColor('#2ECC71');
+
+    return message.reply({ embeds: [embed] });
+  }
+
+  // ==========================================================================
+  // COMMANDE: SUPPRIMER UN LUTTEUR DU ROSTER
+  // ==========================================================================
+  
+  if (command === 'delpick') {
+    const wrestlerName = args.join(' ');
+    
+    if (!wrestlerName) {
+      return message.reply('Usage: `!delpick Nom du Lutteur`');
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    if (!federation) {
+      return message.reply('❌ Tu n\'as pas de fédération.');
+    }
+
+    const wrestlerIndex = federation.roster.findIndex(
+      w => w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+    );
+
+    if (wrestlerIndex === -1) {
+      return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
+    }
+
+    // Retirer du roster
+    federation.roster.splice(wrestlerIndex, 1);
+    await federation.save();
+
+    // Libérer le lutteur dans la base
+    await Wrestler.updateOne(
+      { 
+        name: new RegExp(`^${wrestlerName}$`, 'i'),
+        guildId: message.guild.id
+      },
+      { 
+        isDrafted: false,
+        ownerId: null,
+        ownerFedName: null
+      }
+    );
+
+    const embed = new EmbedBuilder()
+      .setTitle('🗑️ Lutteur Libéré')
+      .setDescription(`**${wrestlerName}** a été retiré du roster de ${federation.name}`)
+      .addFields({ name: 'Nouveau Roster', value: `${federation.roster.length} lutteurs` })
+      .setColor('#E67E22')
+      .setFooter({ text: 'Ce lutteur peut maintenant être drafté par d\'autres' });
 
     return message.reply({ embeds: [embed] });
   }
@@ -935,6 +1037,44 @@ if (votes.length === 0) {
   }
 
   // ==========================================================================
+  // COMMANDE: COMPARER LES SHOWS PAR NUMÉRO
+  // ==========================================================================
+  
+  if (command === 'notes') {
+    const showNumber = parseInt(args[0]);
+    
+    if (!showNumber || isNaN(showNumber)) {
+      return message.reply('Usage: `!notes <numéro du show>`\nExemple: !notes 1');
+    }
+
+    const shows = await Show.find({
+      guildId: message.guild.id,
+      showNumber: showNumber,
+      isFinalized: true
+    }).sort({ averageRating: -1 });
+
+    if (shows.length === 0) {
+      return message.reply(`❌ Aucun show #${showNumber} finalisé trouvé.`);
+    }
+
+    const showsList = shows.map((s, i) => {
+      const stars = getStarDisplay(s.averageRating);
+      const date = new Date(s.createdAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+      return `**${i + 1}.** ${s.federationName}\n${stars} **${s.averageRating.toFixed(2)}/5** - ${date}`;
+    }).join('\n\n');
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📊 Comparaison Show #${showNumber}`)
+      .setDescription(`${shows.length} fédération(s) ont réalisé ce show`)
+      .addFields({ name: '⭐ Classement par Note', value: showsList })
+      .setColor('#E74C3C')
+      .setFooter({ text: 'Classement par note moyenne décroissante' })
+      .setTimestamp();
+
+    return message.reply({ embeds: [embed] });
+  }
+  
+// ==========================================================================
   // COMMANDE: AIDE
   // ==========================================================================
   
@@ -943,14 +1083,13 @@ if (votes.length === 0) {
       .setTitle('📖 Commandes Fantasy Booking')
       .setDescription('Liste des commandes disponibles')
       .addFields(
-        { name: '🏢 Gestion Fédération', value: '`!createfed [nom]` - Créer\n`!fed` - Voir stats\n`!roster` - Voir roster\n`!pick [nom]` - Drafter' },
-        { name: '📺 Shows', value: '`!showend` - Terminer un show\n`!finalize [numéro]` - Finaliser votes' },
+        { name: '🏢 Gestion Fédération', value: '`!createfed [nom]` - Créer\n`!editfed [nouveau nom]` - Renommer\n`!fed` - Voir stats\n`!roster` - Voir roster\n`!pick [nom]` - Drafter\n`!delpick [nom]` - Retirer du roster' },
+        { name: '📺 Shows', value: '`!showend` - Terminer un show\n`!finalize [numéro]` - Finaliser votes\n`!notes [numéro]` - Comparer shows' },
         { name: '👑 Championnats', value: '`!createbelt [nom]` - Créer titre\n`!setchamp [titre] [lutteur]` - Définir champion' },
         { name: '📊 Classements', value: '`!power-ranking [7|30|all]` - Voir rankings' },
         { name: '⚙️ Admin', value: '`!setlogo [fédération]` + image\n`!resetfed [@user]`\n`!resetpr`' }
       )
-      .setColor('#3498DB')
-      .setFooter({ text: 'Les lutteurs draftés sont exclusifs' });
+      .setColor('#3498DB');
 
     return message.reply({ embeds: [embed] });
   }
