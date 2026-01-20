@@ -339,6 +339,8 @@ if (command === 'setlogo') {
     fs.writeFileSync(logoPath, Buffer.from(buffer));
 
     belt.logoUrl = logoPath;
+    console.log(`[DEBUG setbeltlogo] Saved logo at: ${logoPath}`);
+    console.log(`[DEBUG setbeltlogo] File exists after save: ${fs.existsSync(logoPath)}`);
     await belt.save();
 
     const federation = await Federation.findOne({
@@ -1893,9 +1895,12 @@ const embed = new EmbedBuilder()
       .setTimestamp();
 
     // Ajouter le logo du titre si disponible
+    console.log(`[DEBUG titlehistory] Belt: ${belt.beltName}, logoUrl: ${belt.logoUrl}`);
+    console.log(`[DEBUG titlehistory] File exists: ${belt.logoUrl ? fs.existsSync(belt.logoUrl) : 'no logoUrl'}`);
     if (belt.logoUrl && fs.existsSync(belt.logoUrl)) {
       embed.setImage(`attachment://belt_logo.png`);
       const attachment = new AttachmentBuilder(belt.logoUrl, { name: 'belt_logo.png' });
+      console.log(`[DEBUG titlehistory] Attaching logo: ${belt.logoUrl}`);
       return message.reply({ embeds: [embed], files: [attachment] });
     }
 
@@ -1944,8 +1949,8 @@ const belts = await Belt.find({
 
 const championsText = belts.length > 0
   ? belts.map(b => {
-      const logoIcon = (b.logoUrl && fs.existsSync(b.logoUrl)) ? '🖼️ ' : '';
-      return `${logoIcon}🏆 **${b.beltName}**: ${b.currentChampion || 'Vacant'}`;
+      const hasLogo = (b.logoUrl && fs.existsSync(b.logoUrl)) ? ' 🖼️' : '';
+      return `🏆 **${b.beltName}**${hasLogo}: ${b.currentChampion || 'Vacant'}`;
     }).join('\n')
   : 'Aucun titre créé';
 
@@ -2315,37 +2320,42 @@ if (command === 'unlock') {
   // COMMANDE: AIDE
   // ==========================================================================
   
-  if (command === 'help2') {
+  if (command === 'help') {
     const embed = new EmbedBuilder()
       .setTitle('📖 Commandes Fantasy Booking')
-      .setDescription('Liste des commandes disponibles')
+      .setDescription('Liste complète des commandes disponibles')
       .addFields(
         { 
           name: '🏢 Gestion Fédération', 
-          value: '`!createfed [nom]` - Créer\n`!editfed [nouveau nom]` - Renommer\n`!setcolor [numéro/hexa]` - Changer couleur\n`!fed` - Voir stats\n`!roster` - Voir roster\n`!pick [nom]` - Drafter\n`!delpick [nom]` - Retirer du roster\n`!trade @user [lutteur1] pour [lutteur2]` - Échanger' 
+          value: '`!createfed [nom]` - Créer une fédération\n`!editfed [nouveau nom]` - Renommer\n`!setcolor [numéro/hexa]` - Changer couleur\n`!setlogo [fédération]` + image - Définir logo (Admin)\n`!fed` - Voir stats\n`!resetfed [@user]` - Supprimer fédération (Admin)' 
         },
         { 
-          name: '🤼 Lutteurs', 
-          value: '`!wrestler [nom]` - Stats d\'un lutteur\n`!addwin [nom]` - Ajouter victoire\n`!addloss [nom]` - Ajouter défaite\n`!delwin [nom]` - Retirer victoire\n`!delloss [nom]` - Retirer défaite' 
+          name: '🤼 Roster & Lutteurs', 
+          value: '`!roster` - Voir ton roster\n`!pick [nom]` - Drafter un lutteur\n`!delpick [nom]` - Retirer du roster\n`!lock [nom]` - Verrouiller en exclusif\n`!unlock [nom]` - Déverrouiller (partageable)\n`!trade @user [lutteur1] pour [lutteur2]` - Échanger\n`!wrestler [nom]` - Stats détaillées' 
+        },
+        { 
+          name: '⚔️ Statistiques Lutteurs', 
+          value: '`!addwin [nom]` - Ajouter victoire\n`!addloss [nom]` - Ajouter défaite\n`!delwin [nom]` - Retirer victoire\n`!delloss [nom]` - Retirer défaite' 
         },
         { 
           name: '📺 Shows', 
-          value: '`!showend` - Terminer un show\n`!finalize [numéro]` - Finaliser votes\n`!notes [numéro]` - Comparer shows' 
+          value: '`!showend` - Terminer un show\n`!finalize [numéro]` - Finaliser votes\n`!notes [numéro]` - Comparer shows par numéro' 
         },
         { 
           name: '👑 Championnats', 
-          value: '`!createbelt [nom]` - Créer titre\n`!setchamp [titre] [lutteur]` - Définir champion\n`!defense [lutteur]` - Ajouter défense\n`!titlehistory [titre]` - Historique\n`!vacate [titre]` - Libérer le titre\n`!setbeltlogo [titre]` + image - Logo du titre' 
+          value: '`!createbelt [nom]` - Créer un titre\n`!setchamp [titre] [lutteur]` - Définir champion\n`!defense [lutteur]` - Ajouter défense\n`!titlehistory [titre]` ou `!th` - Historique\n`!vacate [titre]` - Libérer le titre\n`!setbeltlogo [titre]` + image - Logo du titre' 
         },
         { 
           name: '📊 Classements', 
-          value: '`!power-ranking [7|30|all]` - Voir rankings' 
+          value: '`!power-ranking [7|30|all]` ou `!pr` - Power rankings' 
         },
         { 
           name: '⚙️ Admin', 
-          value: '`!setlogo [fédération]` + image\n`!resetfed [@user]`\n`!resetpr`' 
+          value: '`!resetpr` - Reset power rankings (Admin)' 
         }
       )
-      .setColor('#3498DB');
+      .setColor('#3498DB')
+      .setFooter({ text: 'Utilisez les commandes sans [] • Exemples: !pick John Cena' });
 
     return message.reply({ embeds: [embed] });
   }
