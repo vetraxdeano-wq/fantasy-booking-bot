@@ -59,6 +59,25 @@ const wrestlerSchema = new mongoose.Schema({
   guildId: String,
   wins: { type: Number, default: 0 },
   losses: { type: Number, default: 0 },
+  isShared: { type: Boolean, default: false },
+  sharedWith: [{ 
+    userId: String, 
+    fedName: String, 
+    sharedAt: { type: Date, default: Date.now } 
+  }],
+  matchHistory: [{
+    opponent: String,
+    result: String, // 'win' ou 'loss'
+    federationName: String,
+    showNumber: Number,
+    date: { type: Date, default: Date.now }
+  }],
+  titleHistory: [{
+    beltName: String,
+    federationName: String,
+    wonAt: { type: Date, default: Date.now },
+    lostAt: { type: Date, default: null }
+  }],
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -217,29 +236,30 @@ const federation = new Federation({
   // COMMANDE: DÉFINIR LE LOGO (ADMIN)
   // ==========================================================================
   
-  if (command === 'setlogo') {
-    if (!message.member.permissions.has('Administrator')) {
-      return message.reply('❌ Commande réservée aux administrateurs.');
-    }
+if (command === 'setlogo') {
+  const fedName = args.join(' ');
+  
+  if (!fedName) {
+    return message.reply('Usage: `!setlogo Nom de la Fédération` (puis attache une image)');
+  }
 
-    const fedName = args.join(' ');
-    
-    if (!fedName) {
-      return message.reply('Usage: `!setlogo Nom de la Fédération` (puis attache une image)');
-    }
+  if (!message.attachments.first()) {
+    return message.reply('❌ Tu dois attacher une image (PNG ou JPG) à ton message !');
+  }
 
-    if (!message.attachments.first()) {
-      return message.reply('❌ Tu dois attacher une image (PNG ou JPG) à ton message !');
-    }
+  const federation = await Federation.findOne({
+    guildId: message.guild.id,
+    name: new RegExp(`^${fedName}$`, 'i')
+  });
 
-    const federation = await Federation.findOne({
-      guildId: message.guild.id,
-      name: new RegExp(`^${fedName}$`, 'i')
-    });
+  if (!federation) {
+    return message.reply('Fédération introuvable.');
+  }
 
-    if (!federation) {
-      return message.reply('Fédération introuvable.');
-    }
+  // Vérifier si c'est le propriétaire OU un admin
+  if (federation.userId !== message.author.id && !message.member.permissions.has('Administrator')) {
+    return message.reply('❌ Seul le propriétaire de la fédération ou un administrateur peut modifier le logo.');
+  }
 
     const attachment = message.attachments.first();
     const ext = path.extname(attachment.name);
@@ -517,50 +537,70 @@ const federation = new Federation({
       guildId: message.guild.id
     });
 
-    if (wrestler && wrestler.isDrafted && wrestler.ownerId !== message.author.id) {
-      return message.reply(
-        `❌ **${wrestler.name}** est déjà signé en exclusivité avec **${wrestler.ownerFedName}** !`
-      );
-    }
+if (wrestler && wrestler.isDrafted && wrestler.ownerId !== message.author.id && !wrestler.isShared) {
+  return message.reply(
+    `❌ **${wrestler.name}** est déjà signé en exclusivité avec **${wrestler.ownerFedName}** !`
+  );
+}
 
-    if (!wrestler) {
-      wrestler = new Wrestler({
-        name: wrestlerName,
-        guildId: message.guild.id
-      });
-      await wrestler.save();
-    }
+if (!wrestler) {
+  wrestler = new Wrestler({
+    name: wrestlerName,
+    guildId: message.guild.id
+  });
+  await wrestler.save();
+}
 
-    const alreadyInRoster = federation.roster.find(w => 
-      w.wrestlerName.toLowerCase() === wrestler.name.toLowerCase()
-    );
+const alreadyInRoster = federation.roster.find(w => 
+  w.wrestlerName.toLowerCase() === wrestler.name.toLowerCase()
+);
 
-    if (alreadyInRoster) {
-      return message.reply(`${wrestler.name} est déjà dans ton roster !`);
-    }
+if (alreadyInRoster) {
+  return message.reply(`${wrestler.name} est déjà dans ton roster !`);
+}
 
-    federation.roster.push({
-      wrestlerName: wrestler.name
+federation.roster.push({
+  wrestlerName: wrestler.name
+});
+
+await federation.save();
+
+// Si le lutteur est partagé, l'ajouter à sharedWith
+if (wrestler.isShared && wrestler.ownerId !== message.author.id) {
+  if (!wrestler.sharedWith) {
+    wrestler.sharedWith = [];
+  }
+  
+  const alreadyShared = wrestler.sharedWith.find(s => s.userId === message.author.id);
+  if (!alreadyShared) {
+    wrestler.sharedWith.push({
+      userId: message.author.id,
+      fedName: federation.name,
+      sharedAt: new Date()
     });
+  }
+} else {
+  // Lutteur non partagé, propriété exclusive
+  wrestler.isDrafted = true;
+  wrestler.ownerId = message.author.id;
+  wrestler.ownerFedName = federation.name;
+}
 
-    await federation.save();
+await wrestler.save();
 
-    wrestler.isDrafted = true;
-    wrestler.ownerId = message.author.id;
-    wrestler.ownerFedName = federation.name;
-    await wrestler.save();
-    
-    const embed = new EmbedBuilder()
-      .setTitle('✅ Lutteur Drafté !')
-      .setDescription(`**${wrestler.name}** a rejoint **${federation.name}** !`)
-      .addFields(
-        { name: 'Lutteur', value: wrestler.name, inline: true },
-        { name: 'Statut', value: '🔒 Exclusif', inline: true },
-        { name: 'Roster Total', value: `${federation.roster.length} lutteurs` }
-      )
-      .setColor(federation.color);
+const statusText = wrestler.isShared ? '🔀 Partagé' : '🔒 Exclusif';
 
-    return message.reply({ embeds: [embed] });
+const embed = new EmbedBuilder()
+  .setTitle('✅ Lutteur Drafté !')
+  .setDescription(`**${wrestler.name}** a rejoint **${federation.name}** !`)
+  .addFields(
+    { name: 'Lutteur', value: wrestler.name, inline: true },
+    { name: 'Statut', value: statusText, inline: true },
+    { name: 'Roster Total', value: `${federation.roster.length} lutteurs` }
+  )
+  .setColor(federation.color);
+
+return message.reply({ embeds: [embed] });
   }
 
   // ==========================================================================
@@ -1024,6 +1064,146 @@ const federation = new Federation({
   }
 
   // ==========================================================================
+// COMMANDE: ENREGISTRER UN MATCH
+// ==========================================================================
+
+if (command === 'match') {
+  const content = args.join(' ');
+  const parts = content.split(/\s+vs\s+/i);
+  
+  if (parts.length !== 2) {
+    return message.reply('Usage: `!match Lutteur 1 vs Lutteur 2`\nExemple: !match John Cena vs Randy Orton\n\nLe premier lutteur mentionné est le gagnant.');
+  }
+
+  const winner = parts[0].trim();
+  const loser = parts[1].trim();
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération.');
+  }
+
+  // Trouver le dernier show
+  const lastShow = await Show.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ showNumber: -1 });
+
+  if (!lastShow) {
+    return message.reply('❌ Tu dois d\'abord créer un show avec `!showend`.');
+  }
+
+  // Trouver ou créer les lutteurs
+  let winnerDoc = await Wrestler.findOne({
+    name: new RegExp(`^${winner}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!winnerDoc) {
+    winnerDoc = new Wrestler({ name: winner, guildId: message.guild.id });
+    await winnerDoc.save();
+  }
+
+  let loserDoc = await Wrestler.findOne({
+    name: new RegExp(`^${loser}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!loserDoc) {
+    loserDoc = new Wrestler({ name: loser, guildId: message.guild.id });
+    await loserDoc.save();
+  }
+
+  // Mettre à jour les victoires/défaites
+  winnerDoc.wins += 1;
+  if (!winnerDoc.matchHistory) winnerDoc.matchHistory = [];
+  winnerDoc.matchHistory.push({
+    opponent: loserDoc.name,
+    result: 'win',
+    federationName: federation.name,
+    showNumber: lastShow.showNumber,
+    date: new Date()
+  });
+  await winnerDoc.save();
+
+  loserDoc.losses += 1;
+  if (!loserDoc.matchHistory) loserDoc.matchHistory = [];
+  loserDoc.matchHistory.push({
+    opponent: winnerDoc.name,
+    result: 'loss',
+    federationName: federation.name,
+    showNumber: lastShow.showNumber,
+    date: new Date()
+  });
+  await loserDoc.save();
+
+  const embed = new EmbedBuilder()
+    .setTitle('⚔️ Match Enregistré !')
+    .setDescription(`**${federation.name}** - Show #${lastShow.showNumber}`)
+    .addFields(
+      { name: '🏆 Vainqueur', value: `${winnerDoc.name}\nRecord: ${winnerDoc.wins}-${winnerDoc.losses}`, inline: true },
+      { name: '❌ Perdant', value: `${loserDoc.name}\nRecord: ${loserDoc.losses}-${loserDoc.losses}`, inline: true }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: 'Les stats ont été mises à jour' });
+
+  return message.reply({ embeds: [embed] });
+}
+
+  // ==========================================================================
+// COMMANDE: HISTORIQUE DES MATCHS D'UN LUTTEUR
+// ==========================================================================
+
+if (command === 'matchs') {
+  const wrestlerName = args.join(' ');
+  
+  if (!wrestlerName) {
+    return message.reply('Usage: `!matchs Nom du Lutteur`\nExemple: !matchs John Cena');
+  }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ ${wrestlerName} n'existe pas dans cette ligue.`);
+  }
+
+  if (!wrestler.matchHistory || wrestler.matchHistory.length === 0) {
+    return message.reply(`${wrestler.name} n'a aucun match enregistré.`);
+  }
+
+  const matchesText = wrestler.matchHistory
+    .sort((a, b) => new Date(b.date) - new Date(a.date))
+    .map((match, i) => {
+      const resultIcon = match.result === 'win' ? '✅' : '❌';
+      const resultText = match.result === 'win' ? 'VICTOIRE' : 'DÉFAITE';
+      const date = new Date(match.date).toLocaleDateString('fr-FR');
+      return `**${i + 1}.** ${resultIcon} ${resultText} vs **${match.opponent}**\n📺 ${match.federationName} - Show #${match.showNumber} (${date})`;
+    }).join('\n\n');
+
+  const record = `${wrestler.wins}-${wrestler.losses}`;
+  const winRate = wrestler.wins + wrestler.losses > 0 
+    ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
+    : 0;
+
+  const embed = new EmbedBuilder()
+    .setTitle(`⚔️ Historique de Matchs - ${wrestler.name}`)
+    .setDescription(`**Record:** ${record} (${winRate}% victoires)`)
+    .addFields({ name: '📋 Matchs', value: matchesText })
+    .setColor('#E67E22')
+    .setFooter({ text: `${wrestler.matchHistory.length} match(s) total` })
+    .setTimestamp();
+
+  return message.reply({ embeds: [embed] });
+}
+
+  // ==========================================================================
   // COMMANDE: AJOUTER UNE DÉFENSE DE TITRE
   // ==========================================================================
   
@@ -1451,12 +1631,12 @@ if (votes.length === 0) {
   // COMMANDE: DÉFINIR UN CHAMPION
   // ==========================================================================
   
-  if (command === 'setchamp') {
+if (command === 'setchamp') {
   const content = args.join(' ');
   const match = content.match(/"([^"]+)"\s+(.+)/);
   
   if (!match) {
-    return message.reply('Usage: `!setchamp "Nom du Titre" Nom du Lutteur`\nExemple: !setchamp "WWE Championship" John Cena');
+    return message.reply('Usage: `!setchamp "Nom du Titre" Nom du Lutteur`\nExemple: !setchamp "WWE Championship" John Cena\nPour un titre Tag/Team: !setchamp "Tag Team Championship" Lutteur 1 & Lutteur 2');
   }
 
   const beltName = match[1];
@@ -1481,16 +1661,113 @@ if (votes.length === 0) {
     return message.reply(`Le titre "${beltName}" n'existe pas. Crée-le avec \`!createbelt ${beltName}\``);
   }
 
-// Capitaliser le nom du lutteur
-  const formattedWrestlerName = wrestlerName.split(' ')
-    .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
-    .join(' ');
+  // Vérifier si c'est un titre Tag Team
+  const isTagTitle = /tag|team/i.test(belt.beltName);
+  
+  let formattedWrestlerName;
+  let wrestlers = [];
+
+  if (isTagTitle) {
+    // Séparer les deux lutteurs
+    const parts = wrestlerName.split(/\s*&\s*/);
+    
+    if (parts.length !== 2) {
+      return message.reply('❌ Pour un titre Tag Team, utilise le format: `Lutteur 1 & Lutteur 2`');
+    }
+
+    wrestlers = parts.map(name => 
+      name.trim().split(' ')
+        .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+        .join(' ')
+    );
+
+    formattedWrestlerName = wrestlers.join(' & ');
+
+    // Ajouter le titre à l'historique des deux lutteurs
+    for (const wrestlerN of wrestlers) {
+      const wrestlerDoc = await Wrestler.findOne({
+        name: new RegExp(`^${wrestlerN}$`, 'i'),
+        guildId: message.guild.id
+      });
+
+      if (wrestlerDoc) {
+        if (!wrestlerDoc.titleHistory) {
+          wrestlerDoc.titleHistory = [];
+        }
+        wrestlerDoc.titleHistory.push({
+          beltName: belt.beltName,
+          federationName: federation.name,
+          wonAt: new Date(),
+          lostAt: null
+        });
+        await wrestlerDoc.save();
+      }
+    }
+  } else {
+    // Titre simple
+    formattedWrestlerName = wrestlerName.split(' ')
+      .map(word => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+      .join(' ');
+
+    // Ajouter le titre à l'historique du lutteur
+    const wrestlerDoc = await Wrestler.findOne({
+      name: new RegExp(`^${formattedWrestlerName}$`, 'i'),
+      guildId: message.guild.id
+    });
+
+    if (wrestlerDoc) {
+      if (!wrestlerDoc.titleHistory) {
+        wrestlerDoc.titleHistory = [];
+      }
+      wrestlerDoc.titleHistory.push({
+        beltName: belt.beltName,
+        federationName: federation.name,
+        wonAt: new Date(),
+        lostAt: null
+      });
+      await wrestlerDoc.save();
+    }
+  }
 
   // Si quelqu'un est déjà champion, terminer son règne
   if (belt.currentChampion && belt.championshipHistory) {
     const currentReign = belt.championshipHistory[belt.championshipHistory.length - 1];
     if (currentReign && !currentReign.lostAt) {
       currentReign.lostAt = new Date();
+      
+      // Terminer le règne dans l'historique des lutteurs concernés
+      if (isTagTitle && currentReign.champion.includes('&')) {
+        const oldChamps = currentReign.champion.split(' & ');
+        for (const champ of oldChamps) {
+          const wrestlerDoc = await Wrestler.findOne({
+            name: new RegExp(`^${champ.trim()}$`, 'i'),
+            guildId: message.guild.id
+          });
+          if (wrestlerDoc && wrestlerDoc.titleHistory) {
+            const reign = wrestlerDoc.titleHistory.find(
+              t => t.beltName === belt.beltName && !t.lostAt
+            );
+            if (reign) {
+              reign.lostAt = new Date();
+              await wrestlerDoc.save();
+            }
+          }
+        }
+      } else {
+        const wrestlerDoc = await Wrestler.findOne({
+          name: new RegExp(`^${currentReign.champion}$`, 'i'),
+          guildId: message.guild.id
+        });
+        if (wrestlerDoc && wrestlerDoc.titleHistory) {
+          const reign = wrestlerDoc.titleHistory.find(
+            t => t.beltName === belt.beltName && !t.lostAt
+          );
+          if (reign) {
+            reign.lostAt = new Date();
+            await wrestlerDoc.save();
+          }
+        }
+      }
     }
   }
 
@@ -1510,10 +1787,10 @@ if (votes.length === 0) {
   await belt.save();
 
   const embed = new EmbedBuilder()
-    .setTitle('👑 Nouveau Champion !')
+    .setTitle(isTagTitle ? '👑 Nouveaux Champions !' : '👑 Nouveau Champion !')
     .addFields(
       { name: 'Titre', value: belt.beltName },
-      { name: 'Champion', value: formattedWrestlerName },
+      { name: isTagTitle ? 'Champions' : 'Champion', value: formattedWrestlerName },
       { name: 'Fédération', value: federation.name }
     )
     .setColor('#FFD700')
@@ -1617,7 +1894,7 @@ const embed = new EmbedBuilder()
 
     // Ajouter le logo du titre si disponible
     if (belt.logoUrl && fs.existsSync(belt.logoUrl)) {
-      embed.setThumbnail(`attachment://belt_logo.png`);
+      embed.setImage(`attachment://belt_logo.png`);
       const attachment = new AttachmentBuilder(belt.logoUrl, { name: 'belt_logo.png' });
       return message.reply({ embeds: [embed], files: [attachment] });
     }
@@ -1649,25 +1926,28 @@ const embed = new EmbedBuilder()
       ? shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length 
       : 0;
 
-    // 3 derniers shows
-    const recentShows = shows.slice(0, 3);
-    const showsText = recentShows.length > 0
-      ? recentShows.map(s => {
-          const date = new Date(s.createdAt).toLocaleDateString('fr-FR');
-          const stars = getStarDisplay(s.averageRating);
-          return `**Show #${s.showNumber}** - ${date}\n${stars} ${s.averageRating.toFixed(2)}/5`;
-        }).join('\n\n')
-      : 'Aucun show finalisé';
+// Top 3 meilleurs shows (au lieu des 3 derniers)
+const topShows = [...shows].sort((a, b) => b.averageRating - a.averageRating).slice(0, 3);
+const showsText = topShows.length > 0
+  ? topShows.map((s, i) => {
+      const date = new Date(s.createdAt).toLocaleDateString('fr-FR');
+      const stars = getStarDisplay(s.averageRating);
+      return `**${i + 1}. Show #${s.showNumber}** - ${date}\n${stars} ${s.averageRating.toFixed(2)}/5`;
+    }).join('\n\n')
+  : 'Aucun show finalisé';
 
-    // Champions
-    const belts = await Belt.find({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
+// Champions avec logos
+const belts = await Belt.find({
+  userId: message.author.id,
+  guildId: message.guild.id
+});
 
-    const championsText = belts.length > 0
-      ? belts.map(b => `🏆 **${b.beltName}**: ${b.currentChampion || 'Vacant'}`).join('\n')
-      : 'Aucun titre créé';
+const championsText = belts.length > 0
+  ? belts.map(b => {
+      const logoIcon = (b.logoUrl && fs.existsSync(b.logoUrl)) ? '🖼️ ' : '';
+      return `${logoIcon}🏆 **${b.beltName}**: ${b.currentChampion || 'Vacant'}`;
+    }).join('\n')
+  : 'Aucun titre créé';
 
     const createdDate = new Date(federation.createdAt).toLocaleDateString('fr-FR');
     const avgStars = getStarDisplay(avgRating);
@@ -1679,7 +1959,7 @@ const embed = new EmbedBuilder()
         { name: '🤼 Roster', value: `${federation.roster.length} lutteurs`, inline: true },
         { name: '📺 Shows', value: `${shows.length} complétés`, inline: true },
         { name: '⭐ Moyenne Globale', value: avgRating > 0 ? `${avgStars} ${avgRating.toFixed(2)}/5` : 'N/A', inline: true },
-        { name: '📊 Derniers Shows', value: showsText },
+        { name: '🏆 Top 3 Meilleurs Shows', value: showsText },
         { name: '👑 Champions', value: championsText }
       )
       .setColor(federation.color)
@@ -1893,6 +2173,29 @@ const embed = new EmbedBuilder()
       b.currentChampion && b.currentChampion.toLowerCase() === wrestler.name.toLowerCase()
     );
 
+    // Derniers matchs
+const recentMatches = wrestler.matchHistory && wrestler.matchHistory.length > 0
+  ? wrestler.matchHistory
+      .sort((a, b) => new Date(b.date) - new Date(a.date))
+      .slice(0, 3)
+      .map(match => {
+        const icon = match.result === 'win' ? '✅' : '❌';
+        return `${icon} vs **${match.opponent}** (Show #${match.showNumber})`;
+      }).join('\n')
+  : 'Aucun match';
+
+// Historique des fédérations si partagé
+let federationHistory = '';
+if (wrestler.isShared && wrestler.sharedWith && wrestler.sharedWith.length > 0) {
+  const allFeds = [
+    `🏢 **${federation.name}** (Origine)`,
+    ...wrestler.sharedWith.map(s => `🔀 **${s.fedName}**`)
+  ];
+  federationHistory = allFeds.join('\n');
+} else {
+  federationHistory = statusText;
+}
+
 // Construction de l'embed
     const statusText = wrestler.isDrafted 
       ? `🏢 **${federation.name}**\n👤 Propriétaire: <@${wrestler.ownerId}>`
@@ -1935,13 +2238,15 @@ const embed = new EmbedBuilder()
     const embed = new EmbedBuilder()
       .setTitle(`🤼 ${wrestler.name}`)
       .setDescription(statusText)
-      .addFields(
-        { name: '⚔️ Record de Combat', value: combatStats },
-        { name: '📊 Statistiques Shows', value: showsText, inline: true },
-        { name: '🏆 Palmarès', value: `${titleReigns.length} titre(s)`, inline: true },
-        { name: '📅 Drafté le', value: wrestler.isDrafted ? signedText : 'Jamais drafté', inline: true },
-        { name: '👑 Championnats', value: titlesText }
-      )
+.addFields(
+  { name: wrestler.isShared ? '🔀 Fédérations' : '🏢 Statut', value: federationHistory },
+  { name: '⚔️ Record de Combat', value: combatStats },
+  { name: '📊 Derniers Matchs', value: recentMatches },
+  { name: '📺 Statistiques Shows', value: showsText, inline: true },
+  { name: '🏆 Palmarès', value: `${titleReigns.length} titre(s)`, inline: true },
+  { name: '📅 Drafté le', value: wrestler.isDrafted ? signedText : 'Jamais drafté', inline: true },
+  { name: '👑 Championnats', value: titlesText }
+)
       .setColor(embedColor)
       .setFooter({ text: currentTitle ? `Champion actuel: ${currentTitle.beltName}` : 'Aucun titre actuellement' })
       .setTimestamp();
@@ -1949,11 +2254,69 @@ const embed = new EmbedBuilder()
     return message.reply({ embeds: [embed] });
   
   }
+
+  // ==========================================================================
+// COMMANDE: DÉBLOQUER UN LUTTEUR (LE RENDRE PARTAGÉ)
+// ==========================================================================
+
+if (command === 'unlock') {
+  const wrestlerName = args.join(' ');
+  
+  if (!wrestlerName) {
+    return message.reply('Usage: `!unlock Nom du Lutteur`');
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération.');
+  }
+
+  const inRoster = federation.roster.find(w => 
+    w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+  );
+
+  if (!inRoster) {
+    return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
+  }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ Lutteur introuvable dans la base de données.`);
+  }
+
+  if (wrestler.isShared) {
+    return message.reply(`⚠️ ${wrestler.name} est déjà partagé.`);
+  }
+
+  wrestler.isShared = true;
+  await wrestler.save();
+
+  const embed = new EmbedBuilder()
+    .setTitle('🔓 Lutteur Débloqué !')
+    .setDescription(`**${wrestler.name}** peut maintenant être drafté par d'autres fédérations`)
+    .addFields(
+      { name: 'Fédération d\'origine', value: federation.name },
+      { name: 'Statut', value: '🔀 Partagé' }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: 'Le lutteur reste dans ton roster' });
+
+  return message.reply({ embeds: [embed] });
+}
+  
 // ==========================================================================
   // COMMANDE: AIDE
   // ==========================================================================
   
-  if (command === 'help') {
+  if (command === 'help2') {
     const embed = new EmbedBuilder()
       .setTitle('📖 Commandes Fantasy Booking')
       .setDescription('Liste des commandes disponibles')
