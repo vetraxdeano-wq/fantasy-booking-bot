@@ -1919,6 +1919,62 @@ const embed = new EmbedBuilder()
   // COMMANDE: SUPPRIMER UN TITRE
   // ==========================================================================
   
+
+  // ==========================================================================
+  // COMMANDE: LIBÉRER UN TITRE (VACATE)
+  // ==========================================================================
+  
+  if (command === 'vacate') {
+    const beltName = args.join(' ');
+    
+    if (!beltName) {
+      return message.reply('Usage: `!vacate Nom du Titre`\nExemple: !vacate World Championship');
+    }
+
+    const belt = await Belt.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id,
+      beltName: new RegExp(`^${beltName}$`, 'i')
+    });
+
+    if (!belt) {
+      return message.reply(`❌ Tu n'as pas de titre nommé "${beltName}".`);
+    }
+
+    if (!belt.currentChampion) {
+      return message.reply(`⚠️ Le titre **${belt.beltName}** est déjà vacant.`);
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    // Enregistrer la fin du règne dans l'historique
+    if (belt.championshipHistory && belt.championshipHistory.length > 0) {
+      const currentReign = belt.championshipHistory[belt.championshipHistory.length - 1];
+      if (!currentReign.lostAt) {
+        currentReign.lostAt = new Date();
+      }
+    }
+
+    const formerChampion = belt.currentChampion;
+    belt.currentChampion = null;
+    await belt.save();
+
+    const embed = new EmbedBuilder()
+      .setTitle('🔓 Titre Libéré')
+      .setDescription(`**${belt.beltName}** est maintenant vacant`)
+      .addFields(
+        { name: 'Ancien Champion', value: formerChampion },
+        { name: 'Fédération', value: federation.name },
+        { name: 'Statut', value: '⚠️ Vacant - En attente d\'un nouveau champion' }
+      )
+      .setColor(federation.color)
+      .setFooter({ text: 'Utilisez !setchamp pour couronner un nouveau champion' });
+
+    return message.reply({ embeds: [embed] });
+  }
   if (command === 'delbelt') {
     const beltName = args.join(' ');
     
