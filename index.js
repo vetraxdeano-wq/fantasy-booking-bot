@@ -192,6 +192,7 @@ function getStarDisplay(rating) {
 async function calculateTVRating(userId, guildId) {
   const federation = await Federation.findOne({ userId, guildId });
   if (!federation) return 0;
+  console.log(`\n=== CALCUL TV RATING: ${federation.name} ===`);
 
   // ========================================================================
   // 1️⃣ QUALITÉ DES SHOWS (40%) - Max 4.0 points
@@ -226,6 +227,7 @@ async function calculateTVRating(userId, guildId) {
   }
 
   showQualityScore = Math.max(0, Math.min(4.0, showQualityScore));
+  console.log(`✅ Shows Quality: ${showQualityScore.toFixed(2)}/4.0`);
 
   // ========================================================================
   // 2️⃣ ROSTER QUALITY (30%) - Max 3.0 points
@@ -284,6 +286,7 @@ async function calculateTVRating(userId, guildId) {
   }
 
   rosterQualityScore = Math.max(0, Math.min(3.0, rosterQualityScore));
+  console.log(`✅ Roster Quality: ${rosterQualityScore.toFixed(2)}/3.0`);
 
   // ========================================================================
   // 3️⃣ CHAMPIONSHIP PRESTIGE (15%) - Max 1.5 points
@@ -361,6 +364,7 @@ async function calculateTVRating(userId, guildId) {
   }
 
   championshipScore = Math.max(0, Math.min(1.5, championshipScore));
+  console.log(`✅ Championship: ${championshipScore.toFixed(2)}/1.5`);
 
   // ========================================================================
   // 4️⃣ MOMENTUM/TENDANCE (10%) - Max 1.0 points
@@ -388,6 +392,7 @@ async function calculateTVRating(userId, guildId) {
   }
 
   momentumScore = Math.max(0, Math.min(1.0, momentumScore));
+  console.log(`✅ Momentum: ${momentumScore.toFixed(2)}/1.0`);
 
   // ========================================================================
   // 5️⃣ ENGAGEMENT (5%) - Max 0.5 points
@@ -403,11 +408,14 @@ async function calculateTVRating(userId, guildId) {
   }
 
   engagementScore = Math.max(0, Math.min(0.5, engagementScore));
+  console.log(`✅ Engagement: ${engagementScore.toFixed(2)}/0.5`);
 
   // ========================================================================
   // CALCUL TOTAL
   // ========================================================================
   const totalRating = showQualityScore + rosterQualityScore + championshipScore + momentumScore + engagementScore;
+  console.log(`🎯 TOTAL: ${totalRating.toFixed(2)}/10.0 | Grade: ${getTVRatingGrade(totalRating)}`);
+  console.log(`===================\n`);
   
   return Math.max(0, Math.min(10.0, totalRating));
 }
