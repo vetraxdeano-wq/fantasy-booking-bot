@@ -177,6 +177,254 @@ function getStarDisplay(rating) {
   return '⭐'.repeat(fullStars) + (hasHalfStar ? '✨' : '');
 }
 
+
+// ============================================================================
+// SYSTÈME TV RATINGS PERMANENT
+// À ajouter APRÈS les schémas mongoose et AVANT la section client.on('messageCreate')
+// ============================================================================
+
+/**
+ * Fonction pour calculer le TV Rating d'une fédération
+ * @param {string} userId - ID de l'utilisateur propriétaire
+ * @param {string} guildId - ID du serveur Discord
+ * @returns {Promise<number>} - Rating entre 0 et 10
+ */
+async function calculateTVRating(userId, guildId) {
+  const federation = await Federation.findOne({ userId, guildId });
+  if (!federation) return 0;
+
+  // ========================================================================
+  // 1️⃣ QUALITÉ DES SHOWS (40%) - Max 4.0 points
+  // ========================================================================
+  const shows = await Show.find({
+    userId,
+    guildId,
+    isFinalized: true
+  }).sort({ createdAt: -1 });
+
+  let showQualityScore = 0;
+  
+  if (shows.length > 0) {
+    // Qualité moyenne pure
+    const avgShowRating = shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length;
+    showQualityScore = (avgShowRating / 5) * 3.5; // Max 3.5 pour la qualité
+
+    // Bonus régularité : au moins 4 shows dans les 30 derniers jours
+    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+    const recentShows = shows.filter(s => new Date(s.createdAt) >= thirtyDaysAgo);
+    if (recentShows.length >= 4) {
+      showQualityScore += 0.3; // Bonus régularité
+    }
+
+    // Pénalité inactivité : pas de show depuis 14 jours
+    const lastShow = shows[0];
+    const daysSinceLastShow = Math.floor((Date.now() - new Date(lastShow.createdAt)) / (1000 * 60 * 60 * 24));
+    if (daysSinceLastShow > 14) {
+      const weeksPenalty = Math.floor(daysSinceLastShow / 7) - 2;
+      showQualityScore -= (weeksPenalty * 0.5);
+    }
+  }
+
+  showQualityScore = Math.max(0, Math.min(4.0, showQualityScore));
+
+  // ========================================================================
+  // 2️⃣ ROSTER QUALITY (30%) - Max 3.0 points
+  // ========================================================================
+  let rosterQualityScore = 0;
+  
+  if (federation.roster.length > 0) {
+    // Récupérer tous les lutteurs du roster
+    const rosterWrestlers = await Promise.all(
+      federation.roster.map(async (r) => {
+        return await Wrestler.findOne({
+          name: new RegExp(`^${r.wrestlerName}$`, 'i'),
+          guildId
+        });
+      })
+    );
+
+    const validWrestlers = rosterWrestlers.filter(w => w && (w.wins + w.losses) > 0);
+    
+    if (validWrestlers.length > 0) {
+      // Win Rate global du roster
+      const totalWins = validWrestlers.reduce((sum, w) => sum + w.wins, 0);
+      const totalMatches = validWrestlers.reduce((sum, w) => sum + w.wins + w.losses, 0);
+      const rosterWinRate = totalMatches > 0 ? (totalWins / totalMatches) : 0;
+      
+      rosterQualityScore = rosterWinRate * 1.8; // Max 1.8 pour le win rate
+
+      // Star Power : compter combien de mes lutteurs sont dans le Top 5 global
+      const allWrestlers = await Wrestler.find({
+        guildId,
+        $or: [{ wins: { $gt: 0 } }, { losses: { $gt: 0 } }]
+      });
+
+      const wrestlerScores = allWrestlers.map(w => {
+        const total = w.wins + w.losses;
+        if (total === 0) return null;
+        const winRate = (w.wins / total) * 100;
+        const score = (winRate * 0.7) + (Math.min(total, 20) * 1.5);
+        return { name: w.name, score };
+      }).filter(Boolean);
+
+      const topFive = wrestlerScores.sort((a, b) => b.score - a.score).slice(0, 5);
+      const myTopFiveCount = topFive.filter(t => 
+        validWrestlers.some(w => w.name.toLowerCase() === t.name.toLowerCase())
+      ).length;
+
+      rosterQualityScore += (myTopFiveCount * 0.24); // +0.24 par top 5 (max 1.2)
+
+      // Pénalité roster déséquilibré
+      if (federation.roster.length < 8) {
+        rosterQualityScore *= 0.7; // -30% si trop petit
+      } else if (federation.roster.length > 50) {
+        rosterQualityScore *= 0.8; // -20% si trop gros
+      }
+    }
+  }
+
+  rosterQualityScore = Math.max(0, Math.min(3.0, rosterQualityScore));
+
+  // ========================================================================
+  // 3️⃣ CHAMPIONSHIP PRESTIGE (15%) - Max 1.5 points
+  // ========================================================================
+  let championshipScore = 0;
+  
+  const belts = await Belt.find({ userId, guildId });
+  
+  if (belts.length > 0) {
+    let totalReignScore = 0;
+    let validReigns = 0;
+
+    for (const belt of belts) {
+      if (belt.currentChampion && belt.championshipHistory && belt.championshipHistory.length > 0) {
+        const currentReign = belt.championshipHistory[belt.championshipHistory.length - 1];
+        
+        if (!currentReign.lostAt) {
+          validReigns++;
+          
+          // Longueur du règne
+          const reignDays = Math.floor((Date.now() - new Date(currentReign.wonAt)) / (1000 * 60 * 60 * 24));
+          
+          let reignScore = 0;
+          if (reignDays < 30) {
+            reignScore = 0.3; // Règne court = mauvais booking
+          } else if (reignDays < 90) {
+            reignScore = 0.6; // Règne moyen
+          } else {
+            reignScore = 1.0; // Règne long = bon booking
+          }
+
+          // Bonus défenses
+          const defenses = currentReign.defenses || 0;
+          reignScore += Math.min(defenses * 0.1, 0.5); // Max +0.5
+
+          // Bonus si champion dominant (70%+ winrate)
+          const championName = belt.currentChampion.split(' & ')[0]; // Pour les tag teams
+          const champion = await Wrestler.findOne({
+            name: new RegExp(`^${championName}$`, 'i'),
+            guildId
+          });
+
+          if (champion) {
+            const totalMatches = champion.wins + champion.losses;
+            if (totalMatches > 0) {
+              const champWinRate = (champion.wins / totalMatches) * 100;
+              if (champWinRate >= 70) {
+                reignScore += 0.3; // Champion dominant
+              }
+            }
+          }
+
+          totalReignScore += reignScore;
+        }
+      }
+    }
+
+    if (validReigns > 0) {
+      championshipScore = Math.min(totalReignScore / validReigns, 1.5);
+    }
+
+    // Pénalité titres vacants depuis > 14 jours
+    const vacantBelts = belts.filter(b => !b.currentChampion);
+    vacantBelts.forEach(b => {
+      if (b.championshipHistory && b.championshipHistory.length > 0) {
+        const lastReign = b.championshipHistory[b.championshipHistory.length - 1];
+        if (lastReign.lostAt) {
+          const vacantDays = Math.floor((Date.now() - new Date(lastReign.lostAt)) / (1000 * 60 * 60 * 24));
+          if (vacantDays > 14) {
+            championshipScore -= 0.3;
+          }
+        }
+      }
+    });
+  }
+
+  championshipScore = Math.max(0, Math.min(1.5, championshipScore));
+
+  // ========================================================================
+  // 4️⃣ MOMENTUM/TENDANCE (10%) - Max 1.0 points
+  // ========================================================================
+  let momentumScore = 0;
+  
+  if (shows.length >= 6) {
+    const last3Shows = shows.slice(0, 3);
+    const previous3Shows = shows.slice(3, 6);
+    
+    const last3Avg = last3Shows.reduce((sum, s) => sum + s.averageRating, 0) / 3;
+    const prev3Avg = previous3Shows.reduce((sum, s) => sum + s.averageRating, 0) / 3;
+    
+    const improvement = last3Avg - prev3Avg;
+    momentumScore = Math.max(-0.5, Math.min(0.5, improvement)); // -0.5 à +0.5
+  }
+
+  // Bonus activité récente (show dans les 7 derniers jours)
+  if (shows.length > 0) {
+    const lastShow = shows[0];
+    const daysSinceLastShow = Math.floor((Date.now() - new Date(lastShow.createdAt)) / (1000 * 60 * 60 * 24));
+    if (daysSinceLastShow <= 7) {
+      momentumScore += 0.2;
+    }
+  }
+
+  momentumScore = Math.max(0, Math.min(1.0, momentumScore));
+
+  // ========================================================================
+  // 5️⃣ ENGAGEMENT (5%) - Max 0.5 points
+  // ========================================================================
+  let engagementScore = 0;
+  
+  if (shows.length > 0) {
+    const totalVotes = shows.reduce((sum, s) => sum + (s.ratings ? s.ratings.length : 0), 0);
+    const avgVotes = totalVotes / shows.length;
+    
+    // Seuil optimal : 5 votes par show
+    engagementScore = Math.min(avgVotes / 5, 1.0) * 0.5;
+  }
+
+  engagementScore = Math.max(0, Math.min(0.5, engagementScore));
+
+  // ========================================================================
+  // CALCUL TOTAL
+  // ========================================================================
+  const totalRating = showQualityScore + rosterQualityScore + championshipScore + momentumScore + engagementScore;
+  
+  return Math.max(0, Math.min(10.0, totalRating));
+}
+
+/**
+ * Fonction pour obtenir le grade textuel du TV Rating
+ * @param {number} rating - Rating entre 0 et 10
+ * @returns {string} - Grade textuel avec emoji
+ */
+function getTVRatingGrade(rating) {
+  if (rating >= 9.0) return '🔥 Ratings en Feu';
+  if (rating >= 7.5) return '⭐ Prime Time';
+  if (rating >= 6.0) return '📺 Solide';
+  if (rating >= 4.5) return '📉 En Difficulté';
+  return '💀 En Crise';
+}
+
 // ============================================================================
 // ÉVÉNEMENT: BOT PRÊT
 // ============================================================================
@@ -2205,6 +2453,8 @@ const championsText = belts.length > 0
 
     const createdDate = new Date(federation.createdAt).toLocaleDateString('fr-FR');
     const avgStars = getStarDisplay(avgRating);
+    const tvRating = await calculateTVRating(message.author.id, message.guild.id);
+    const grade = getTVRatingGrade(tvRating);
 
     const embed = new EmbedBuilder()
       .setTitle(`${federation.name}`)
@@ -2213,6 +2463,7 @@ const championsText = belts.length > 0
         { name: '🤼 Roster', value: `${federation.roster.length} lutteurs`, inline: true },
         { name: '📺 Shows', value: `${shows.length} complétés`, inline: true },
         { name: '⭐ Moyenne Globale', value: avgRating > 0 ? `${avgStars} ${avgRating.toFixed(2)}/5` : 'N/A', inline: true },
+        { name: '📺 TV Rating', value: `${tvRating.toFixed(2)}/10.0 | ${grade}` },
         { name: '🏆 Top 3 Meilleurs Shows', value: showsText },
         { name: '👑 Champions', value: championsText }
       )
@@ -2330,25 +2581,22 @@ const championsText = belts.length > 0
 // À ajouter après la commande !power-ranking existante
 // ============================================================================
 
+// ============================================================================
+// 1. POWER RANKING INDIVIDUEL DES LUTTEURS (TOP 5) - CORRIGÉ
+// À ajouter après la commande !power-ranking existante
+// ============================================================================
+
 if (command === 'wrestler-ranking' || command === 'wr') {
-  const period = args[0]?.toLowerCase() || '30';
+  const period = args[0]?.toLowerCase() || 'all';
   
   if (!['7', '30', 'all'].includes(period)) {
     return message.reply('Usage: `!wrestler-ranking [7|30|all]`\nExemple: !wrestler-ranking 30');
   }
 
-  let dateFilter = {};
   let periodText = '';
-
   if (period === '7') {
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    dateFilter = { 'matchHistory.date': { $gte: sevenDaysAgo } };
     periodText = '7 derniers jours';
   } else if (period === '30') {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    dateFilter = { 'matchHistory.date': { $gte: thirtyDaysAgo } };
     periodText = '30 derniers jours';
   } else {
     periodText = 'Depuis le début';
@@ -2363,26 +2611,14 @@ if (command === 'wrestler-ranking' || command === 'wr') {
     ]
   });
 
-  // Calculer le score de chaque lutteur
+  // Calculer le score de chaque lutteur en utilisant les vrais wins/losses
   const wrestlerStats = wrestlers.map(w => {
-    let relevantWins = w.wins;
-    let relevantLosses = w.losses;
-
-    // Si période limitée, filtrer les matchs
-    if (period !== 'all' && w.matchHistory) {
-      const cutoffDate = period === '7' 
-        ? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
-        : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-
-      const recentMatches = w.matchHistory.filter(m => new Date(m.date) >= cutoffDate);
-      relevantWins = recentMatches.filter(m => m.result === 'win').length;
-      relevantLosses = recentMatches.filter(m => m.result === 'loss').length;
-    }
-
-    const totalMatches = relevantWins + relevantLosses;
+    // UTILISER DIRECTEMENT w.wins et w.losses (les vraies stats)
+    const totalMatches = w.wins + w.losses;
+    
     if (totalMatches === 0) return null;
 
-    const winRate = (relevantWins / totalMatches) * 100;
+    const winRate = (w.wins / totalMatches) * 100;
     
     // Score composite : (winRate * 0.7) + (totalMatches * 0.3)
     // Favorise les lutteurs avec bon winrate ET activité
@@ -2390,8 +2626,8 @@ if (command === 'wrestler-ranking' || command === 'wr') {
 
     return {
       name: w.name,
-      wins: relevantWins,
-      losses: relevantLosses,
+      wins: w.wins,
+      losses: w.losses,
       totalMatches,
       winRate,
       score,
@@ -2406,7 +2642,7 @@ if (command === 'wrestler-ranking' || command === 'wr') {
     .slice(0, 5);
 
   if (topWrestlers.length === 0) {
-    return message.reply('❌ Aucun lutteur avec des matchs dans cette période.');
+    return message.reply('❌ Aucun lutteur avec des matchs.');
   }
 
   const rankingText = topWrestlers.map((w, i) => {
@@ -2424,7 +2660,7 @@ if (command === 'wrestler-ranking' || command === 'wr') {
 
   return message.reply({ embeds: [embed] });
 }
-
+  
   // ==========================================================================
   // COMMANDE: COMPARER LES SHOWS PAR NUMÉRO
   // ==========================================================================
@@ -2619,6 +2855,59 @@ if (command === 'wrestler' || command === 'w') {
     .setTimestamp();
 
   return message.reply({ embeds: [embed] });
+}
+
+  if (command === 'tvratings' || command === 'ratings') {
+  const loadingMsg = await message.reply('📊 Calcul des TV Ratings en cours...');
+
+  try {
+    // Récupérer toutes les fédérations du serveur
+    const federations = await Federation.find({ guildId: message.guild.id });
+
+    if (federations.length === 0) {
+      return loadingMsg.edit('❌ Aucune fédération sur ce serveur.');
+    }
+
+    // Calculer le rating de chaque fédération
+    const ratingsData = await Promise.all(
+      federations.map(async (fed) => {
+        const rating = await calculateTVRating(fed.userId, fed.guildId);
+        return {
+          name: fed.name,
+          userId: fed.userId,
+          rating,
+          color: fed.color
+        };
+      })
+    );
+
+    // Trier par rating décroissant
+    const sorted = ratingsData.sort((a, b) => b.rating - a.rating);
+
+    // Top 5 (ou moins si moins de fédérations)
+    const topFeds = sorted.slice(0, Math.min(5, sorted.length));
+
+    const rankingText = topFeds.map((fed, i) => {
+      const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
+      const grade = getTVRatingGrade(fed.rating);
+      const trend = i === 0 ? '👑' : '';
+      
+      return `${medal} **${fed.name}** ${trend}\n📺 ${fed.rating.toFixed(2)}/10.0 | ${grade}`;
+    }).join('\n\n');
+
+    const embed = new EmbedBuilder()
+      .setTitle('📺 TV RATINGS')
+      .setDescription(rankingText)
+      .setColor(topFeds[0].color)
+      .setFooter({ text: 'Le rating est un mystère... Bookez bien pour grimper ! 🎯' })
+      .setTimestamp();
+
+    await loadingMsg.edit({ content: null, embeds: [embed] });
+
+  } catch (error) {
+    console.error('Erreur calcul TV ratings:', error);
+    await loadingMsg.edit('❌ Erreur lors du calcul des ratings.');
+  }
 }
 
   // ==========================================================================
