@@ -2516,28 +2516,155 @@ if (command === 'unlock') {
 }
 
   // ============================================================================
-// 5. NOUVELLE COMMANDE !wikipedia (à ajouter AVANT la commande !help2)
+// COMMANDE: SYNCHRONISER LA WIKIPEDIA (à ajouter AVANT !wikipedia)
+// Cette commande scanne tous les rosters et ajoute les lutteurs à la wikipedia
+// ============================================================================
+
+if (command === 'syncwiki' || command === 'syncwikipedia') {
+  if (!message.member.permissions.has('Administrator')) {
+    return message.reply('❌ Commande réservée aux administrateurs.');
+  }
+
+  const syncMsg = await message.reply('⏳ Synchronisation de la Wikipedia en cours...');
+
+  try {
+    // Récupérer toutes les fédérations du serveur
+    const federations = await Federation.find({
+      guildId: message.guild.id
+    });
+
+    let totalSynced = 0;
+    let alreadyUpToDate = 0;
+    const syncDetails = [];
+
+    for (const federation of federations) {
+      if (!federation.roster || federation.roster.length === 0) continue;
+
+      for (const rosterEntry of federation.roster) {
+        // Trouver ou créer le lutteur
+        let wrestler = await Wrestler.findOne({
+          name: new RegExp(`^${rosterEntry.wrestlerName}$`, 'i'),
+          guildId: message.guild.id
+        });
+
+        if (!wrestler) {
+          // Créer le lutteur s'il n'existe pas
+          wrestler = new Wrestler({
+            name: rosterEntry.wrestlerName,
+            guildId: message.guild.id,
+            isDrafted: true,
+            ownerId: federation.userId,
+            ownerFedName: federation.name,
+            federationHistory: [{
+              federationName: federation.name,
+              userId: federation.userId,
+              action: 'picked',
+              date: rosterEntry.signedDate || new Date()
+            }]
+          });
+          await wrestler.save();
+          totalSynced++;
+          syncDetails.push(`✅ Créé: **${wrestler.name}** → ${federation.name}`);
+          continue;
+        }
+
+        // Vérifier si le lutteur a déjà un historique
+        if (!wrestler.federationHistory) {
+          wrestler.federationHistory = [];
+        }
+
+        // Vérifier si cette fédération est déjà dans l'historique
+        const alreadyInHistory = wrestler.federationHistory.some(h => 
+          h.federationName === federation.name && 
+          h.userId === federation.userId &&
+          h.action === 'picked'
+        );
+
+        if (!alreadyInHistory) {
+          // Ajouter l'entrée dans l'historique
+          wrestler.federationHistory.push({
+            federationName: federation.name,
+            userId: federation.userId,
+            action: 'picked',
+            date: rosterEntry.signedDate || new Date()
+          });
+
+          // Mettre à jour les infos si nécessaire
+          if (!wrestler.isDrafted || wrestler.ownerId !== federation.userId) {
+            wrestler.isDrafted = true;
+            wrestler.ownerId = federation.userId;
+            wrestler.ownerFedName = federation.name;
+          }
+
+          await wrestler.save();
+          totalSynced++;
+          syncDetails.push(`🔄 Synchronisé: **${wrestler.name}** → ${federation.name}`);
+        } else {
+          alreadyUpToDate++;
+        }
+      }
+    }
+
+    // Préparer le rapport
+    const reportEmbed = new EmbedBuilder()
+      .setTitle('✅ Synchronisation Wikipedia Terminée !')
+      .addFields(
+        { name: '📊 Statistiques', value: `**${totalSynced}** lutteur(s) synchronisé(s)\n**${alreadyUpToDate}** déjà à jour\n**${federations.length}** fédération(s) scannée(s)` }
+      )
+      .setColor('#2ECC71')
+      .setTimestamp();
+
+    // Ajouter les détails si pas trop long
+    if (syncDetails.length > 0 && syncDetails.length <= 10) {
+      reportEmbed.addFields({
+        name: '📝 Détails',
+        value: syncDetails.join('\n')
+      });
+    } else if (syncDetails.length > 10) {
+      reportEmbed.addFields({
+        name: '📝 Aperçu',
+        value: syncDetails.slice(0, 10).join('\n') + `\n... et ${syncDetails.length - 10} autre(s)`
+      });
+    }
+
+    reportEmbed.setFooter({ text: 'Utilisez !wikipedia pour voir tous les lutteurs' });
+
+    await syncMsg.edit({ content: null, embeds: [reportEmbed] });
+
+  } catch (error) {
+    console.error('Erreur synchronisation wiki:', error);
+    await syncMsg.edit('❌ Erreur lors de la synchronisation. Vérifiez les logs.');
+  }
+}
+
+
+// ============================================================================
+// MODIFICATION DE !wikipedia POUR INCLURE TOUS LES LUTTEURS
+// REMPLACE ta commande !wikipedia actuelle par celle-ci
 // ============================================================================
 
 if (command === 'wikipedia' || command === 'wiki') {
-  // Récupérer tous les lutteurs qui ont été pickés au moins une fois
-  const wrestlers = await Wrestler.find({
+  // Récupérer TOUS les lutteurs qui ont été draftés OU qui sont dans un roster
+  const allWrestlers = await Wrestler.find({
     guildId: message.guild.id,
-    federationHistory: { $exists: true, $ne: [] }
+    $or: [
+      { federationHistory: { $exists: true, $ne: [] } },
+      { isDrafted: true }
+    ]
   }).sort({ name: 1 }); // Tri alphabétique
 
-  if (wrestlers.length === 0) {
-    return message.reply('📚 La Wikipedia est vide. Aucun lutteur n\'a encore été drafté.');
+  if (allWrestlers.length === 0) {
+    return message.reply('📚 La Wikipedia est vide. Aucun lutteur n\'a encore été drafté.\n💡 Utilisez `!syncwiki` pour synchroniser les lutteurs existants.');
   }
 
   const itemsPerPage = 7;
-  const totalPages = Math.ceil(wrestlers.length / itemsPerPage);
+  const totalPages = Math.ceil(allWrestlers.length / itemsPerPage);
   let currentPage = 0;
 
   const generateEmbed = async (page) => {
     const start = page * itemsPerPage;
     const end = start + itemsPerPage;
-    const pageWrestlers = wrestlers.slice(start, end);
+    const pageWrestlers = allWrestlers.slice(start, end);
 
     const wrestlersList = await Promise.all(
       pageWrestlers.map(async (w, i) => {
@@ -2555,7 +2682,11 @@ if (command === 'wikipedia' || command === 'wiki') {
           statusText = '🆓 Agent Libre';
         }
 
-        return `**${start + i + 1}.** ${w.name}\n📊 Record: ${record} | ${statusText}`;
+        // Ajouter une icône si le lutteur a des titres
+        const hasTitles = w.titleHistory && w.titleHistory.some(t => !t.lostAt);
+        const titleIcon = hasTitles ? ' 👑' : '';
+
+        return `**${start + i + 1}.** ${w.name}${titleIcon}\n📊 Record: ${record} | ${statusText}`;
       })
     );
 
@@ -2563,7 +2694,7 @@ if (command === 'wikipedia' || command === 'wiki') {
       .setTitle('📚 Wikipedia des Lutteurs')
       .setDescription(wrestlersList.join('\n\n'))
       .addFields(
-        { name: 'Total', value: `${wrestlers.length} lutteur${wrestlers.length > 1 ? 's' : ''} répertorié${wrestlers.length > 1 ? 's' : ''}` }
+        { name: 'Total', value: `${allWrestlers.length} lutteur${allWrestlers.length > 1 ? 's' : ''} répertorié${allWrestlers.length > 1 ? 's' : ''}` }
       )
       .setColor('#F39C12')
       .setFooter({ text: `Page ${page + 1}/${totalPages} • Utilisez !wrestler <nom> pour plus de détails` });
