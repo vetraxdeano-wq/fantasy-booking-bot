@@ -1139,16 +1139,60 @@ if (wrestler2) {
 // COMMANDE: ENREGISTRER UN MATCH
 // ==========================================================================
 
+// ============================================================================
+// 2. COMMANDE !MATCH AMÉLIORÉE (Tag Team & Multi-Man)
+// REMPLACE la commande !match existante
+// ============================================================================
+
 if (command === 'match') {
   const content = args.join(' ');
-  const parts = content.split(/\s+vs\s+/i);
   
-  if (parts.length !== 2) {
-    return message.reply('Usage: `!match Lutteur 1 vs Lutteur 2`\nExemple: !match John Cena vs Randy Orton\n\nLe premier lutteur mentionné est le gagnant.');
+  // Détecter le type de match
+  let matchType = 'singles'; // singles, tag, multi
+  let teams = [];
+  
+  // Tag Team: "Team1 (A & B) vs Team2 (C & D)"
+  const tagMatch = content.match(/(.+?)\s*\((.+?)\s*&\s*(.+?)\)\s*vs\s*(.+?)\s*\((.+?)\s*&\s*(.+?)\)/i);
+  
+  // Multi-Man: "A vs B vs C vs D"
+  const multiMatch = content.split(/\s+vs\s+/i);
+  
+  if (tagMatch) {
+    matchType = 'tag';
+    teams = [
+      {
+        name: tagMatch[1].trim(),
+        members: [tagMatch[2].trim(), tagMatch[3].trim()],
+        isWinner: true
+      },
+      {
+        name: tagMatch[4].trim(),
+        members: [tagMatch[5].trim(), tagMatch[6].trim()],
+        isWinner: false
+      }
+    ];
+  } else if (multiMatch.length > 2) {
+    matchType = 'multi';
+    teams = multiMatch.map((name, i) => ({
+      name: name.trim(),
+      members: [name.trim()],
+      isWinner: i === 0 // Le premier mentionné gagne
+    }));
+  } else if (multiMatch.length === 2) {
+    matchType = 'singles';
+    teams = [
+      { name: multiMatch[0].trim(), members: [multiMatch[0].trim()], isWinner: true },
+      { name: multiMatch[1].trim(), members: [multiMatch[1].trim()], isWinner: false }
+    ];
+  } else {
+    return message.reply(
+      '❌ Format invalide.\n\n**Formats acceptés:**\n' +
+      '• Simple: `!match Winner vs Loser`\n' +
+      '• Tag Team: `!match Team1 (A & B) vs Team2 (C & D)`\n' +
+      '• Multi-Man: `!match Winner vs Loser1 vs Loser2 vs Loser3`\n\n' +
+      '⚠️ Le premier lutteur/équipe mentionné(e) est le vainqueur'
+    );
   }
-
-  const winner = parts[0].trim();
-  const loser = parts[1].trim();
 
   const federation = await Federation.findOne({
     userId: message.author.id,
@@ -1159,7 +1203,6 @@ if (command === 'match') {
     return message.reply('❌ Tu n\'as pas de fédération.');
   }
 
-  // Trouver le dernier show
   const lastShow = await Show.findOne({
     userId: message.author.id,
     guildId: message.guild.id
@@ -1169,56 +1212,76 @@ if (command === 'match') {
     return message.reply('❌ Tu dois d\'abord créer un show avec `!showend`.');
   }
 
-  // Trouver ou créer les lutteurs
-  let winnerDoc = await Wrestler.findOne({
-    name: new RegExp(`^${winner}$`, 'i'),
-    guildId: message.guild.id
-  });
+  // Traiter chaque équipe/lutteur
+  const processedWrestlers = [];
+  
+  for (const team of teams) {
+    for (const memberName of team.members) {
+      let wrestler = await Wrestler.findOne({
+        name: new RegExp(`^${memberName}$`, 'i'),
+        guildId: message.guild.id
+      });
 
-  if (!winnerDoc) {
-    winnerDoc = new Wrestler({ name: winner, guildId: message.guild.id });
-    await winnerDoc.save();
+      if (!wrestler) {
+        wrestler = new Wrestler({ name: memberName, guildId: message.guild.id });
+        await wrestler.save();
+      }
+
+      // Mettre à jour stats
+      if (team.isWinner) {
+        wrestler.wins += 1;
+      } else {
+        wrestler.losses += 1;
+      }
+
+      // Ajouter à l'historique
+      if (!wrestler.matchHistory) wrestler.matchHistory = [];
+      
+      const opponentNames = teams
+        .filter(t => t !== team)
+        .map(t => t.name)
+        .join(' vs ');
+
+      wrestler.matchHistory.push({
+        opponent: opponentNames,
+        result: team.isWinner ? 'win' : 'loss',
+        federationName: federation.name,
+        showNumber: lastShow.showNumber,
+        date: new Date()
+      });
+
+      await wrestler.save();
+      processedWrestlers.push({ wrestler, isWinner: team.isWinner });
+    }
   }
 
-  let loserDoc = await Wrestler.findOne({
-    name: new RegExp(`^${loser}$`, 'i'),
-    guildId: message.guild.id
-  });
+  // Créer l'embed de résultat
+  const matchTypeText = {
+    singles: '⚔️ Match Simple',
+    tag: '👥 Match Tag Team',
+    multi: '🔥 Match Multi-Man'
+  }[matchType];
 
-  if (!loserDoc) {
-    loserDoc = new Wrestler({ name: loser, guildId: message.guild.id });
-    await loserDoc.save();
-  }
+  const winnersText = teams.find(t => t.isWinner).members
+    .map(name => {
+      const w = processedWrestlers.find(p => p.wrestler.name.toLowerCase() === name.toLowerCase()).wrestler;
+      return `${w.name} (${w.wins}-${w.losses})`;
+    }).join(' & ');
 
-  // Mettre à jour les victoires/défaites
-  winnerDoc.wins += 1;
-  if (!winnerDoc.matchHistory) winnerDoc.matchHistory = [];
-  winnerDoc.matchHistory.push({
-    opponent: loserDoc.name,
-    result: 'win',
-    federationName: federation.name,
-    showNumber: lastShow.showNumber,
-    date: new Date()
-  });
-  await winnerDoc.save();
-
-  loserDoc.losses += 1;
-  if (!loserDoc.matchHistory) loserDoc.matchHistory = [];
-  loserDoc.matchHistory.push({
-    opponent: winnerDoc.name,
-    result: 'loss',
-    federationName: federation.name,
-    showNumber: lastShow.showNumber,
-    date: new Date()
-  });
-  await loserDoc.save();
+  const losersText = teams.filter(t => !t.isWinner)
+    .map(team => team.members
+      .map(name => {
+        const w = processedWrestlers.find(p => p.wrestler.name.toLowerCase() === name.toLowerCase()).wrestler;
+        return `${w.name} (${w.wins}-${w.losses})`;
+      }).join(' & ')
+    ).join(' vs ');
 
   const embed = new EmbedBuilder()
-    .setTitle('⚔️ Match Enregistré !')
+    .setTitle(`${matchTypeText} Enregistré !`)
     .setDescription(`**${federation.name}** - Show #${lastShow.showNumber}`)
     .addFields(
-      { name: '🏆 Vainqueur', value: `${winnerDoc.name}\nRecord: ${winnerDoc.wins}-${winnerDoc.losses}`, inline: true },
-      { name: '❌ Perdant', value: `${loserDoc.name}\nRecord: ${loserDoc.losses}-${loserDoc.losses}`, inline: true }
+      { name: '🏆 Vainqueur(s)', value: winnersText },
+      { name: '❌ Perdant(s)', value: losersText }
     )
     .setColor(federation.color)
     .setFooter({ text: 'Les stats ont été mises à jour' });
@@ -2261,6 +2324,106 @@ const championsText = belts.length > 0
 
     return message.reply({ embeds: [embed] });
   }
+
+  // ============================================================================
+// 1. POWER RANKING INDIVIDUEL DES LUTTEURS (TOP 5)
+// À ajouter après la commande !power-ranking existante
+// ============================================================================
+
+if (command === 'wrestler-ranking' || command === 'wr') {
+  const period = args[0]?.toLowerCase() || '30';
+  
+  if (!['7', '30', 'all'].includes(period)) {
+    return message.reply('Usage: `!wrestler-ranking [7|30|all]`\nExemple: !wrestler-ranking 30');
+  }
+
+  let dateFilter = {};
+  let periodText = '';
+
+  if (period === '7') {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    dateFilter = { 'matchHistory.date': { $gte: sevenDaysAgo } };
+    periodText = '7 derniers jours';
+  } else if (period === '30') {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    dateFilter = { 'matchHistory.date': { $gte: thirtyDaysAgo } };
+    periodText = '30 derniers jours';
+  } else {
+    periodText = 'Depuis le début';
+  }
+
+  // Récupérer tous les lutteurs avec au moins 1 match
+  const wrestlers = await Wrestler.find({
+    guildId: message.guild.id,
+    $or: [
+      { wins: { $gt: 0 } },
+      { losses: { $gt: 0 } }
+    ]
+  });
+
+  // Calculer le score de chaque lutteur
+  const wrestlerStats = wrestlers.map(w => {
+    let relevantWins = w.wins;
+    let relevantLosses = w.losses;
+
+    // Si période limitée, filtrer les matchs
+    if (period !== 'all' && w.matchHistory) {
+      const cutoffDate = period === '7' 
+        ? new Date(Date.now() - 7 * 24 * 60 * 60 * 1000)
+        : new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+
+      const recentMatches = w.matchHistory.filter(m => new Date(m.date) >= cutoffDate);
+      relevantWins = recentMatches.filter(m => m.result === 'win').length;
+      relevantLosses = recentMatches.filter(m => m.result === 'loss').length;
+    }
+
+    const totalMatches = relevantWins + relevantLosses;
+    if (totalMatches === 0) return null;
+
+    const winRate = (relevantWins / totalMatches) * 100;
+    
+    // Score composite : (winRate * 0.7) + (totalMatches * 0.3)
+    // Favorise les lutteurs avec bon winrate ET activité
+    const score = (winRate * 0.7) + (Math.min(totalMatches, 20) * 1.5);
+
+    return {
+      name: w.name,
+      wins: relevantWins,
+      losses: relevantLosses,
+      totalMatches,
+      winRate,
+      score,
+      federation: w.ownerFedName || 'Agent Libre',
+      titleCount: w.titleHistory ? w.titleHistory.filter(t => !t.lostAt).length : 0
+    };
+  }).filter(Boolean);
+
+  // Trier par score décroissant et prendre le top 5
+  const topWrestlers = wrestlerStats
+    .sort((a, b) => b.score - a.score)
+    .slice(0, 5);
+
+  if (topWrestlers.length === 0) {
+    return message.reply('❌ Aucun lutteur avec des matchs dans cette période.');
+  }
+
+  const rankingText = topWrestlers.map((w, i) => {
+    const medal = ['🥇', '🥈', '🥉', '4️⃣', '5️⃣'][i];
+    const titleIcon = w.titleCount > 0 ? ` 👑×${w.titleCount}` : '';
+    return `${medal} **${w.name}**${titleIcon}\n📊 ${w.wins}-${w.losses} (${w.winRate.toFixed(1)}%) | 🏢 ${w.federation}\n⭐ Score: ${w.score.toFixed(1)}`;
+  }).join('\n\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle('🏆 Top 5 Lutteurs')
+    .setDescription(`**Période:** ${periodText}\n\n${rankingText}`)
+    .setColor('#F1C40F')
+    .setFooter({ text: 'Score = (WinRate × 70%) + (Activité × 30%) • !wr 7/30/all' })
+    .setTimestamp();
+
+  return message.reply({ embeds: [embed] });
+}
 
   // ==========================================================================
   // COMMANDE: COMPARER LES SHOWS PAR NUMÉRO
