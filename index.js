@@ -1837,6 +1837,13 @@ if (command === 'setchamp') {
         .setColor('#FFD700')
         .setFooter({ text: 'Aucun règne enregistré dans l\'historique' });
 
+      // Ajouter le logo du titre si disponible
+      if (belt.logoUrl && fs.existsSync(belt.logoUrl)) {
+        embed.setImage(`attachment://belt_logo.png`);
+        const attachment = new AttachmentBuilder(belt.logoUrl, { name: 'belt_logo.png' });
+        return message.reply({ embeds: [embed], files: [attachment] });
+      }
+
       return message.reply({ embeds: [embed] });
     }
 
@@ -1907,6 +1914,59 @@ const embed = new EmbedBuilder()
     return message.reply({ embeds: [embed] });
   }
 
+
+  // ==========================================================================
+  // COMMANDE: SUPPRIMER UN TITRE
+  // ==========================================================================
+  
+  if (command === 'delbelt') {
+    const beltName = args.join(' ');
+    
+    if (!beltName) {
+      return message.reply('Usage: `!delbelt Nom du Titre`\nExemple: !delbelt World Championship');
+    }
+
+    const belt = await Belt.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id,
+      beltName: new RegExp(`^${beltName}$`, 'i')
+    });
+
+    if (!belt) {
+      return message.reply(`❌ Tu n'as pas de titre nommé "${beltName}".`);
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    // Supprimer le fichier logo s'il existe
+    if (belt.logoUrl && fs.existsSync(belt.logoUrl)) {
+      try {
+        fs.unlinkSync(belt.logoUrl);
+        console.log(`[DEBUG delbelt] Logo deleted: ${belt.logoUrl}`);
+      } catch (err) {
+        console.error(`[DEBUG delbelt] Error deleting logo: ${err.message}`);
+      }
+    }
+
+    // Supprimer le titre de la base de données
+    await Belt.deleteOne({ _id: belt._id });
+
+    const embed = new EmbedBuilder()
+      .setTitle('🗑️ Titre Supprimé')
+      .setDescription(`Le titre **${belt.beltName}** a été supprimé définitivement`)
+      .addFields(
+        { name: 'Fédération', value: federation.name },
+        { name: 'Ancien Champion', value: belt.currentChampion || 'Vacant' },
+        { name: 'Règnes Enregistrés', value: `${belt.championshipHistory ? belt.championshipHistory.length : 0}` }
+      )
+      .setColor('#E74C3C')
+      .setFooter({ text: 'Cette action est irréversible' });
+
+    return message.reply({ embeds: [embed] });
+  }
   // ==========================================================================
   // COMMANDE: VOIR SA FÉDÉRATION (AMÉLIORÉE)
   // ==========================================================================
@@ -2320,7 +2380,7 @@ if (command === 'unlock') {
   // COMMANDE: AIDE
   // ==========================================================================
   
-  if (command === 'help') {
+  if (command === 'help2') {
     const embed = new EmbedBuilder()
       .setTitle('📖 Commandes Fantasy Booking')
       .setDescription('Liste complète des commandes disponibles')
@@ -2343,7 +2403,7 @@ if (command === 'unlock') {
         },
         { 
           name: '👑 Championnats', 
-          value: '`!createbelt [nom]` - Créer un titre\n`!setchamp [titre] [lutteur]` - Définir champion\n`!defense [lutteur]` - Ajouter défense\n`!titlehistory [titre]` ou `!th` - Historique\n`!vacate [titre]` - Libérer le titre\n`!setbeltlogo [titre]` + image - Logo du titre' 
+          value: '`!createbelt [nom]` - Créer un titre\n`!setchamp [titre] [lutteur]` - Définir champion\n`!defense [lutteur]` - Ajouter défense\n`!titlehistory [titre]` ou `!th` - Historique\n`!vacate [titre]` - Libérer le titre\n`!delbelt [titre]` - Supprimer titre\n`!setbeltlogo [titre]` + image - Logo du titre' 
         },
         { 
           name: '📊 Classements', 
