@@ -2113,147 +2113,146 @@ const championsText = belts.length > 0
   // COMMANDE: STATISTIQUES D'UN LUTTEUR
   // ==========================================================================
   
-  if (command === 'wrestler' || command === 'w') {
-    const wrestlerName = args.join(' ');
-    
-    if (!wrestlerName) {
-      return message.reply('Usage: `!wrestler Nom du Lutteur`\nExemple: !wrestler John Cena');
-    }
-
-    const wrestler = await Wrestler.findOne({
-      name: new RegExp(`^${wrestlerName}$`, 'i'),
-      guildId: message.guild.id
-    });
-
-    if (!wrestler) {
-      return message.reply(`❌ ${wrestlerName} n'existe pas dans cette ligue.`);
-    }
-
-    // Fédération actuelle
-    const federation = wrestler.isDrafted 
-      ? await Federation.findOne({ userId: wrestler.ownerId, guildId: message.guild.id })
-      : null;
-
-    // Shows où il est présent (via sa fédération)
-    const shows = federation 
-      ? await Show.find({
-          userId: federation.userId,
-          guildId: message.guild.id,
-          isFinalized: true
-        }).sort({ createdAt: -1 })
-      : [];
-
-    const avgShowRating = shows.length > 0
-      ? shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length
-      : 0;
-
-    // Titres gagnés
-    const belts = await Belt.find({
-      guildId: message.guild.id,
-      'championshipHistory.champion': new RegExp(`^${wrestler.name}$`, 'i')
-    });
-
-    const titleReigns = [];
-    belts.forEach(belt => {
-      belt.championshipHistory.forEach(reign => {
-        if (reign.champion.toLowerCase() === wrestler.name.toLowerCase()) {
-          titleReigns.push({
-            beltName: belt.beltName,
-            wonAt: reign.wonAt,
-            lostAt: reign.lostAt,
-            defenses: reign.defenses,
-            federationName: belt.federationName
-          });
-        }
-      });
-    });
-
-    // Titre actuel
-    const currentTitle = belts.find(b => 
-      b.currentChampion && b.currentChampion.toLowerCase() === wrestler.name.toLowerCase()
-    );
-
-    // Derniers matchs
-const recentMatches = wrestler.matchHistory && wrestler.matchHistory.length > 0
-  ? wrestler.matchHistory
-      .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, 3)
-      .map(match => {
-        const icon = match.result === 'win' ? '✅' : '❌';
-        return `${icon} vs **${match.opponent}** (Show #${match.showNumber})`;
-      }).join('\n')
-  : 'Aucun match';
-
-// Historique des fédérations si partagé
-let federationHistory = '';
-if (wrestler.isShared && wrestler.sharedWith && wrestler.sharedWith.length > 0) {
-  const allFeds = [
-    `🏢 **${federation.name}** (Origine)`,
-    ...wrestler.sharedWith.map(s => `🔀 **${s.fedName}**`)
-  ];
-  federationHistory = allFeds.join('\n');
-} else {
-  federationHistory = statusText;
-}
-
-// Construction de l'embed
-    const statusText = wrestler.isDrafted 
-      ? `🏢 **${federation.name}**\n👤 Propriétaire: <@${wrestler.ownerId}>`
-      : '🆓 Agent Libre';
-
-    const showsText = shows.length > 0
-      ? `${shows.length} show(s)\n⭐ Moyenne: ${getStarDisplay(avgShowRating)} ${avgShowRating.toFixed(2)}/5`
-      : 'Aucun show';
-
-    // Stats de combat
-    const record = `${wrestler.wins}-${wrestler.losses}`;
-    const totalMatches = wrestler.wins + wrestler.losses;
-    const winRate = totalMatches > 0 
-      ? ((wrestler.wins / totalMatches) * 100).toFixed(1)
-      : 0;
-    
-    const combatStats = totalMatches > 0
-      ? `**Record:** ${record}\n**Taux de victoire:** ${winRate}%\n**Total matchs:** ${totalMatches}`
-      : 'Aucun match enregistré';
-
-    const titlesText = titleReigns.length > 0
-      ? titleReigns.map(reign => {
-          const wonDate = new Date(reign.wonAt).toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
-          const current = !reign.lostAt ? ' 👑' : '';
-          const defenses = reign.defenses > 0 ? ` (${reign.defenses} défense${reign.defenses > 1 ? 's' : ''})` : '';
-          return `🏆 **${reign.beltName}**${current}\n${reign.federationName} - ${wonDate}${defenses}`;
-        }).join('\n\n')
-      : 'Aucun titre remporté';
-
-    const signedDate = wrestler.isDrafted && federation
-      ? federation.roster.find(w => w.wrestlerName.toLowerCase() === wrestler.name.toLowerCase())
-      : null;
-    
-    const signedText = signedDate 
-      ? new Date(signedDate.signedDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
-      : 'N/A';
-
-    const embedColor = wrestler.isDrafted && federation ? federation.color : '#95A5A6';
-
-    const embed = new EmbedBuilder()
-      .setTitle(`🤼 ${wrestler.name}`)
-      .setDescription(statusText)
-.addFields(
-  { name: wrestler.isShared ? '🔀 Fédérations' : '🏢 Statut', value: federationHistory },
-  { name: '⚔️ Record de Combat', value: combatStats },
-  { name: '📊 Derniers Matchs', value: recentMatches },
-  { name: '📺 Statistiques Shows', value: showsText, inline: true },
-  { name: '🏆 Palmarès', value: `${titleReigns.length} titre(s)`, inline: true },
-  { name: '📅 Drafté le', value: wrestler.isDrafted ? signedText : 'Jamais drafté', inline: true },
-  { name: '👑 Championnats', value: titlesText }
-)
-      .setColor(embedColor)
-      .setFooter({ text: currentTitle ? `Champion actuel: ${currentTitle.beltName}` : 'Aucun titre actuellement' })
-      .setTimestamp();
-
-    return message.reply({ embeds: [embed] });
+if (command === 'wrestler' || command === 'w') {
+  const wrestlerName = args.join(' ');
   
+  if (!wrestlerName) {
+    return message.reply('Usage: `!wrestler Nom du Lutteur`\nExemple: !wrestler John Cena');
   }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ ${wrestlerName} n'existe pas dans cette ligue.`);
+  }
+
+  // Fédération actuelle
+  const federation = wrestler.isDrafted 
+    ? await Federation.findOne({ userId: wrestler.ownerId, guildId: message.guild.id })
+    : null;
+
+  // Shows où il est présent (via sa fédération)
+  const shows = federation 
+    ? await Show.find({
+        userId: federation.userId,
+        guildId: message.guild.id,
+        isFinalized: true
+      }).sort({ createdAt: -1 })
+    : [];
+
+  const avgShowRating = shows.length > 0
+    ? shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length
+    : 0;
+
+  // Titres gagnés
+  const belts = await Belt.find({
+    guildId: message.guild.id,
+    'championshipHistory.champion': new RegExp(`^${wrestler.name}$`, 'i')
+  });
+
+  const titleReigns = [];
+  belts.forEach(belt => {
+    belt.championshipHistory.forEach(reign => {
+      if (reign.champion.toLowerCase() === wrestler.name.toLowerCase()) {
+        titleReigns.push({
+          beltName: belt.beltName,
+          wonAt: reign.wonAt,
+          lostAt: reign.lostAt,
+          defenses: reign.defenses,
+          federationName: belt.federationName
+        });
+      }
+    });
+  });
+
+  // Titre actuel
+  const currentTitle = belts.find(b => 
+    b.currentChampion && b.currentChampion.toLowerCase() === wrestler.name.toLowerCase()
+  );
+
+  // Derniers matchs
+  const recentMatches = wrestler.matchHistory && wrestler.matchHistory.length > 0
+    ? wrestler.matchHistory
+        .sort((a, b) => new Date(b.date) - new Date(a.date))
+        .slice(0, 3)
+        .map(match => {
+          const icon = match.result === 'win' ? '✅' : '❌';
+          return `${icon} vs **${match.opponent}** (Show #${match.showNumber})`;
+        }).join('\n')
+    : 'Aucun match';
+
+  // IMPORTANT: Définir statusText AVANT federationHistory
+  const statusText = wrestler.isDrafted 
+    ? `🏢 **${federation.name}**\n💤 Propriétaire: <@${wrestler.ownerId}>`
+    : '🆓 Agent Libre';
+
+  // Historique des fédérations si partagé
+  let federationHistory = '';
+  if (wrestler.isShared && wrestler.sharedWith && wrestler.sharedWith.length > 0) {
+    const allFeds = [
+      `🏢 **${federation.name}** (Origine)`,
+      ...wrestler.sharedWith.map(s => `🔀 **${s.fedName}**`)
+    ];
+    federationHistory = allFeds.join('\n');
+  } else {
+    federationHistory = statusText;
+  }
+
+  const showsText = shows.length > 0
+    ? `${shows.length} show(s)\n⭐ Moyenne: ${getStarDisplay(avgShowRating)} ${avgShowRating.toFixed(2)}/5`
+    : 'Aucun show';
+
+  // Stats de combat
+  const record = `${wrestler.wins}-${wrestler.losses}`;
+  const totalMatches = wrestler.wins + wrestler.losses;
+  const winRate = totalMatches > 0 
+    ? ((wrestler.wins / totalMatches) * 100).toFixed(1)
+    : 0;
+  
+  const combatStats = totalMatches > 0
+    ? `**Record:** ${record}\n**Taux de victoire:** ${winRate}%\n**Total matchs:** ${totalMatches}`
+    : 'Aucun match enregistré';
+
+  const titlesText = titleReigns.length > 0
+    ? titleReigns.map(reign => {
+        const wonDate = new Date(reign.wonAt).toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
+        const current = !reign.lostAt ? ' 👑' : '';
+        const defenses = reign.defenses > 0 ? ` (${reign.defenses} défense${reign.defenses > 1 ? 's' : ''})` : '';
+        return `🏆 **${reign.beltName}**${current}\n${reign.federationName} - ${wonDate}${defenses}`;
+      }).join('\n\n')
+    : 'Aucun titre remporté';
+
+  const signedDate = wrestler.isDrafted && federation
+    ? federation.roster.find(w => w.wrestlerName.toLowerCase() === wrestler.name.toLowerCase())
+    : null;
+  
+  const signedText = signedDate 
+    ? new Date(signedDate.signedDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
+    : 'N/A';
+
+  const embedColor = wrestler.isDrafted && federation ? federation.color : '#95A5A6';
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🤼 ${wrestler.name}`)
+    .setDescription(wrestler.isShared ? '🔀 Lutteur Partagé' : statusText)
+    .addFields(
+      { name: wrestler.isShared ? '🏢 Fédérations' : '📊 Statut', value: federationHistory },
+      { name: '⚔️ Record de Combat', value: combatStats },
+      { name: '📋 Derniers Matchs', value: recentMatches },
+      { name: '📺 Statistiques Shows', value: showsText, inline: true },
+      { name: '🏆 Palmarès', value: `${titleReigns.length} titre(s)`, inline: true },
+      { name: '📅 Drafté le', value: wrestler.isDrafted ? signedText : 'Jamais drafté', inline: true },
+      { name: '👑 Championnats', value: titlesText }
+    )
+    .setColor(embedColor)
+    .setFooter({ text: currentTitle ? `Champion actuel: ${currentTitle.beltName}` : 'Aucun titre actuellement' })
+    .setTimestamp();
+
+  return message.reply({ embeds: [embed] });
+}
 
   // ==========================================================================
 // COMMANDE: DÉBLOQUER UN LUTTEUR (LE RENDRE PARTAGÉ)
