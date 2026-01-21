@@ -1667,7 +1667,7 @@ if (command === 'matchs') {
   // COMMANDE: VOIR SON ROSTER
   // ==========================================================================
   
- if (command === 'roster') {
+if (command === 'roster') {
   const federation = await Federation.findOne({
     userId: message.author.id,
     guildId: message.guild.id
@@ -1681,66 +1681,144 @@ if (command === 'matchs') {
     return message.reply('Ton roster est vide.');
   }
 
-  // Tri alphabétique
-  const sortedRoster = [...federation.roster].sort((a, b) => 
-    a.wrestlerName.localeCompare(b.wrestlerName, 'fr')
+  // Récupérer les infos complètes de chaque lutteur
+  const rosterWithStats = await Promise.all(
+    federation.roster.map(async (r) => {
+      const wrestler = await Wrestler.findOne({
+        name: new RegExp(`^${r.wrestlerName}$`, 'i'),
+        guildId: message.guild.id
+      });
+      
+      return {
+        name: r.wrestlerName,
+        signedDate: r.signedDate,
+        wrestler: wrestler,
+        wins: wrestler?.wins || 0,
+        losses: wrestler?.losses || 0,
+        totalMatches: (wrestler?.wins || 0) + (wrestler?.losses || 0)
+      };
+    })
   );
 
-  const itemsPerPage = 7;
-  const totalPages = Math.ceil(sortedRoster.length / itemsPerPage);
+  let currentSortMode = 'alpha'; // 'alpha' ou 'record'
   let currentPage = 0;
 
-  const generateEmbed = (page) => {
+  const getSortedRoster = (sortMode) => {
+    if (sortMode === 'record') {
+      return [...rosterWithStats].sort((a, b) => {
+        const winRateA = a.totalMatches > 0 ? (a.wins / a.totalMatches) : 0;
+        const winRateB = b.totalMatches > 0 ? (b.wins / b.totalMatches) : 0;
+        
+        // Trier par winrate décroissant, puis par nombre de victoires
+        if (winRateB !== winRateA) return winRateB - winRateA;
+        return b.wins - a.wins;
+      });
+    } else {
+      // Tri alphabétique par défaut
+      return [...rosterWithStats].sort((a, b) => 
+        a.name.localeCompare(b.name, 'fr')
+      );
+    }
+  };
+
+  const itemsPerPage = 7;
+
+  const generateEmbed = async (sortMode, page) => {
+    const sortedRoster = getSortedRoster(sortMode);
+    const totalPages = Math.ceil(sortedRoster.length / itemsPerPage);
+    
     const start = page * itemsPerPage;
     const end = start + itemsPerPage;
     const pageRoster = sortedRoster.slice(start, end);
 
-    const rosterText = pageRoster.map((w, i) => {
-      const signedDate = new Date(w.signedDate).toLocaleDateString('fr-FR');
-      return `**${start + i + 1}.** ${w.wrestlerName} - 🔒 Exclusif (Signé le ${signedDate})`;
-    }).join('\n');
+    const rosterText = await Promise.all(pageRoster.map(async (entry, i) => {
+      const w = entry.wrestler;
+      const signedDate = new Date(entry.signedDate).toLocaleDateString('fr-FR');
+      const record = `${entry.wins}-${entry.losses}`;
+      
+      // Vérifier si le lutteur est titré
+      const hasTitles = w?.titleHistory && w.titleHistory.some(t => !t.lostAt);
+      const crownIcon = hasTitles ? ' 👑' : '';
+      
+      // Déterminer le statut réel du lutteur
+      let statusIcon = '🔒 Exclusif';
+      if (w) {
+        if (w.isShared) {
+          const sharedCount = w.sharedWith ? w.sharedWith.length : 0;
+          if (w.ownerId === message.author.id) {
+            // Tu es le propriétaire et tu as partagé
+            statusIcon = `🔓 Partagé (${sharedCount} autre${sharedCount > 1 ? 's' : ''})`;
+          } else {
+            // Tu as drafté un lutteur partagé par quelqu'un d'autre
+            statusIcon = '🔀 Partagé';
+          }
+        } else if (w.ownerId === message.author.id) {
+          statusIcon = '🔒 Exclusif';
+        }
+      }
+      
+      return `**${start + i + 1}.** ${entry.name}${crownIcon}\n📊 ${record} • ${statusIcon} (Signé le ${signedDate})`;
+    }));
+
+    const sortText = sortMode === 'record' ? '📊 Trié par record' : '🔤 Trié alphabétiquement';
 
     const embed = new EmbedBuilder()
       .setTitle(`🤼 Roster - ${federation.name}`)
-      .setDescription(rosterText)
+      .setDescription(`${sortText}\n\n${rosterText.join('\n\n')}`)
       .addFields(
         { name: 'Total', value: `${federation.roster.length} lutteurs` }
       )
       .setColor(federation.color)
-      .setFooter({ text: `Page ${page + 1}/${totalPages}` });
+      .setFooter({ text: `Page ${page + 1}/${totalPages} • Utilisez les boutons pour trier et naviguer` });
 
     if (federation.logoUrl && fs.existsSync(federation.logoUrl)) {
       embed.setThumbnail(`attachment://logo.png`);
     }
 
-    return embed;
+    return { embed, totalPages };
   };
 
-  const { ButtonBuilder, ButtonStyle, ActionRowBuilder } = require('discord.js');
+  const createButtons = (sortMode, page, totalPages) => {
+    const navigationRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('previous')
+          .setLabel('◀️ Précédent')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(page === 0),
+        new ButtonBuilder()
+          .setCustomId('next')
+          .setLabel('Suivant ▶️')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(page >= totalPages - 1)
+      );
 
-  const row = new ActionRowBuilder()
-    .addComponents(
-      new ButtonBuilder()
-        .setCustomId('previous')
-        .setLabel('◀️ Précédent')
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(currentPage === 0),
-      new ButtonBuilder()
-        .setCustomId('next')
-        .setLabel('Suivant ▶️')
-        .setStyle(ButtonStyle.Primary)
-        .setDisabled(totalPages <= 1)
-    );
+    const sortRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('sort_alpha')
+          .setLabel('🔤 Alphabétique')
+          .setStyle(sortMode === 'alpha' ? ButtonStyle.Success : ButtonStyle.Secondary)
+          .setDisabled(sortMode === 'alpha'),
+        new ButtonBuilder()
+          .setCustomId('sort_record')
+          .setLabel('📊 Par Record')
+          .setStyle(sortMode === 'record' ? ButtonStyle.Success : ButtonStyle.Secondary)
+          .setDisabled(sortMode === 'record')
+      );
+
+    return [navigationRow, sortRow];
+  };
+
+  const { embed: initialEmbed, totalPages } = await generateEmbed(currentSortMode, currentPage);
 
   const embedMessage = await message.reply({
-    embeds: [generateEmbed(currentPage)],
-    components: totalPages > 1 ? [row] : [],
+    embeds: [initialEmbed],
+    components: createButtons(currentSortMode, currentPage, totalPages),
     files: federation.logoUrl && fs.existsSync(federation.logoUrl) 
       ? [new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' })] 
       : []
   });
-
-  if (totalPages <= 1) return;
 
   const collector = embedMessage.createMessageComponentCollector({
     time: 120000 // 2 minutes
@@ -1751,29 +1829,27 @@ if (command === 'matchs') {
       return interaction.reply({ content: 'Ce n\'est pas ton roster !', ephemeral: true });
     }
 
+    // Gestion de la navigation
     if (interaction.customId === 'previous') {
       currentPage = Math.max(0, currentPage - 1);
     } else if (interaction.customId === 'next') {
+      const { totalPages } = await generateEmbed(currentSortMode, 0);
       currentPage = Math.min(totalPages - 1, currentPage + 1);
     }
+    // Gestion du tri
+    else if (interaction.customId === 'sort_alpha') {
+      currentSortMode = 'alpha';
+      currentPage = 0; // Retour à la page 1 lors du changement de tri
+    } else if (interaction.customId === 'sort_record') {
+      currentSortMode = 'record';
+      currentPage = 0; // Retour à la page 1 lors du changement de tri
+    }
 
-    const updatedRow = new ActionRowBuilder()
-      .addComponents(
-        new ButtonBuilder()
-          .setCustomId('previous')
-          .setLabel('◀️ Précédent')
-          .setStyle(ButtonStyle.Primary)
-          .setDisabled(currentPage === 0),
-        new ButtonBuilder()
-          .setCustomId('next')
-          .setLabel('Suivant ▶️')
-          .setStyle(ButtonStyle.Primary)
-          .setDisabled(currentPage === totalPages - 1)
-      );
+    const { embed: updatedEmbed, totalPages } = await generateEmbed(currentSortMode, currentPage);
 
     await interaction.update({
-      embeds: [generateEmbed(currentPage)],
-      components: [updatedRow]
+      embeds: [updatedEmbed],
+      components: createButtons(currentSortMode, currentPage, totalPages)
     });
   });
 
@@ -2771,15 +2847,15 @@ if (command === 'wrestler' || command === 'w') {
     b.currentChampion && b.currentChampion.toLowerCase() === wrestler.name.toLowerCase()
   );
 
-  // Derniers matchs
+// Derniers matchs
   const recentMatches = wrestler.matchHistory && wrestler.matchHistory.length > 0
     ? wrestler.matchHistory
         .sort((a, b) => new Date(b.date) - new Date(a.date))
         .slice(0, 3)
         .map(match => {
           const icon = match.result === 'win' ? '✅' : '❌';
-          return `${icon} vs **${match.opponent}** (Show #${match.showNumber})`;
-        }).join('\n')
+          return `${icon} vs **${match.opponent}**\n📺 ${match.federationName} - Show #${match.showNumber}`;
+        }).join('\n\n')
     : 'Aucun match';
 
   // ⭐ HISTORIQUE DES FÉDÉRATIONS
