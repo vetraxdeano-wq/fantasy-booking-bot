@@ -119,6 +119,20 @@ const showSchema = new mongoose.Schema({
 
 const Show = mongoose.model('Show', showSchema);
 
+const pleSchema = new mongoose.Schema({
+  pleName: String,
+  userId: String,
+  guildId: String,
+  federationName: String,
+  messageId: String,
+  ratings: [{ userId: String, stars: Number }],
+  averageRating: { type: Number, default: 0 },
+  isFinalized: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now }
+});
+
+const PLE = mongoose.model('PLE', pleSchema);
+
 const beltSchema = new mongoose.Schema({
   userId: String,
   guildId: String,
@@ -194,40 +208,60 @@ async function calculateTVRating(userId, guildId) {
   if (!federation) return 0;
   console.log(`\n=== CALCUL TV RATING: ${federation.name} ===`);
 
-  // ========================================================================
-  // 1️⃣ QUALITÉ DES SHOWS (40%) - Max 4.0 points
-  // ========================================================================
-  const shows = await Show.find({
-    userId,
-    guildId,
-    isFinalized: true
-  }).sort({ createdAt: -1 });
+// ========================================================================
+// 1️⃣ QUALITÉ DES SHOWS ET PLEs (40%) - Max 4.0 points
+// ========================================================================
+const shows = await Show.find({
+  userId,
+  guildId,
+  isFinalized: true
+}).sort({ createdAt: -1 });
 
-  let showQualityScore = 0;
+const ples = await PLE.find({
+  userId,
+  guildId,
+  isFinalized: true
+}).sort({ createdAt: -1 });
+
+let showQualityScore = 0;
+
+// Combiner shows et PLEs pour le calcul
+const allEvents = [
+  ...shows.map(s => ({ rating: s.averageRating, createdAt: s.createdAt, type: 'show' })),
+  ...ples.map(p => ({ rating: p.averageRating, createdAt: p.createdAt, type: 'ple' }))
+];
+
+if (allEvents.length > 0) {
+  // Qualité moyenne pure (PLEs comptent double)
+  const totalWeightedRating = allEvents.reduce((sum, e) => {
+    const weight = e.type === 'ple' ? 2 : 1;
+    return sum + (e.rating * weight);
+  }, 0);
   
-  if (shows.length > 0) {
-    // Qualité moyenne pure
-    const avgShowRating = shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length;
-    showQualityScore = (avgShowRating / 5) * 3.5; // Max 3.5 pour la qualité
+  const totalWeight = allEvents.reduce((sum, e) => sum + (e.type === 'ple' ? 2 : 1), 0);
+  const avgRating = totalWeightedRating / totalWeight;
+  
+  showQualityScore = (avgRating / 5) * 3.5; // Max 3.5 pour la qualité
 
-    // Bonus régularité : au moins 4 shows dans les 30 derniers jours
-    const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
-    const recentShows = shows.filter(s => new Date(s.createdAt) >= thirtyDaysAgo);
-    if (recentShows.length >= 4) {
-      showQualityScore += 0.3; // Bonus régularité
-    }
-
-    // Pénalité inactivité : pas de show depuis 14 jours
-    const lastShow = shows[0];
-    const daysSinceLastShow = Math.floor((Date.now() - new Date(lastShow.createdAt)) / (1000 * 60 * 60 * 24));
-    if (daysSinceLastShow > 14) {
-      const weeksPenalty = Math.floor(daysSinceLastShow / 7) - 2;
-      showQualityScore -= (weeksPenalty * 0.5);
-    }
+  // Bonus régularité : au moins 4 events dans les 30 derniers jours
+  const thirtyDaysAgo = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000);
+  const recentEvents = allEvents.filter(e => new Date(e.createdAt) >= thirtyDaysAgo);
+  if (recentEvents.length >= 4) {
+    showQualityScore += 0.3; // Bonus régularité
   }
 
-  showQualityScore = Math.max(0, Math.min(4.0, showQualityScore));
-  console.log(`✅ Shows Quality: ${showQualityScore.toFixed(2)}/4.0`);
+  // Pénalité inactivité : pas d'event depuis 14 jours
+  const sortedEvents = allEvents.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  const lastEvent = sortedEvents[0];
+  const daysSinceLastEvent = Math.floor((Date.now() - new Date(lastEvent.createdAt)) / (1000 * 60 * 60 * 24));
+  if (daysSinceLastEvent > 14) {
+    const weeksPenalty = Math.floor(daysSinceLastEvent / 7) - 2;
+    showQualityScore -= (weeksPenalty * 0.5);
+  }
+}
+
+showQualityScore = Math.max(0, Math.min(4.0, showQualityScore));
+console.log(`✅ Shows & PLEs Quality: ${showQualityScore.toFixed(2)}/4.0`);
 
   // ========================================================================
   // 2️⃣ ROSTER QUALITY (30%) - Max 3.0 points
@@ -1914,6 +1948,280 @@ if (command === 'roster') {
     return message.channel.send('**Légende:** 1️⃣=0.5⭐ | 2️⃣=1⭐ | 3️⃣=1.5⭐ | 4️⃣=2⭐ | 5️⃣=2.5⭐ | 6️⃣=3⭐ | 7️⃣=3.5⭐ | 8️⃣=4⭐ | 9️⃣=4.5⭐ | 🔟=5⭐');
   }
 
+  // ============================================================================
+// COMMANDE: ANNONCER LA FIN D'UN PLE
+// À ajouter après la commande !showend (vers ligne 1200)
+// ============================================================================
+
+if (command === 'pleend') {
+  const pleName = args.join(' ');
+  
+  if (!pleName) {
+    return message.reply(
+      'Usage: `!pleend Nom du PLE`\n\n' +
+      'Exemples:\n' +
+      '• `!pleend WrestleMania 41`\n' +
+      '• `!pleend Royal Rumble 2026`\n' +
+      '• `!pleend SummerSlam`\n\n' +
+      '💡 Le nom peut contenir plusieurs mots'
+    );
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('Tu n\'as pas de fédération.');
+  }
+
+  const ple = new PLE({
+    pleName: pleName,
+    userId: message.author.id,
+    guildId: message.guild.id,
+    federationName: federation.name
+  });
+
+  await ple.save();
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🎭 ${pleName}`)
+    .setDescription(`**${federation.name}**\n\nRéagissez avec des étoiles pour noter le PLE !`)
+    .addFields(
+      { name: 'Type', value: '🌟 Premium Live Event' },
+      { name: 'Statut', value: '⏳ En attente des votes...' }
+    )
+    .setColor(federation.color);
+
+  const bookeurRole = message.guild.roles.cache.find(r => r.name === 'Bookeur');
+  const mention = bookeurRole ? `${bookeurRole}` : '';
+
+  const msg = await message.reply({ 
+    content: mention ? `${mention} Nouveau PLE à noter !` : undefined,
+    embeds: [embed] 
+  });
+  
+  ple.messageId = msg.id;
+  await ple.save();
+
+  for (let i = 0; i < 10; i++) {
+    await msg.react(EMOJI_NUMBERS[i]);
+  }
+
+  return message.channel.send('**Légende:** 1️⃣=0.5⭐ | 2️⃣=1⭐ | 3️⃣=1.5⭐ | 4️⃣=2⭐ | 5️⃣=2.5⭐ | 6️⃣=3⭐ | 7️⃣=3.5⭐ | 8️⃣=4⭐ | 9️⃣=4.5⭐ | 🔟=5⭐');
+}
+
+// ============================================================================
+// COMMANDE: FINALISER LES VOTES D'UN PLE
+// À ajouter après !pleend
+// ============================================================================
+
+if (command === 'finalizeple' || command === 'fp') {
+  const pleName = args.join(' ');
+
+  if (!pleName) {
+    return message.reply('Usage: `!finalizeple Nom du PLE`\nExemple: !finalizeple WrestleMania 41');
+  }
+
+  const ple = await PLE.findOne({
+    pleName: new RegExp(`^${pleName}$`, 'i'),
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!ple) {
+    return message.reply(`❌ PLE "${pleName}" introuvable.`);
+  }
+
+  if (ple.isFinalized) {
+    return message.reply(`⚠️ Le PLE "${pleName}" a déjà été finalisé !`);
+  }
+
+  if (!ple.messageId) {
+    return message.reply('❌ Impossible de retrouver le message du PLE.');
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  let msg;
+  try {
+    msg = await message.channel.messages.fetch(ple.messageId);
+  } catch (error) {
+    return message.reply('❌ Message du PLE introuvable. Il a peut-être été supprimé.');
+  }
+  
+  const votes = [];
+
+  await msg.fetch();
+
+  for (let i = 0; i < 10; i++) {
+    const reaction = msg.reactions.cache.find(r => r.emoji.name === EMOJI_NUMBERS[i]);
+    
+    if (reaction) {
+      try {
+        const users = await reaction.users.fetch({ limit: 100 });
+        
+        console.log(`Emoji ${EMOJI_NUMBERS[i]} (${STAR_VALUES[i]}⭐): ${users.size} utilisateurs`);
+        
+        users.forEach(user => {
+          if (!user.bot && !votes.find(v => v.userId === user.id)) {
+            votes.push({ 
+              userId: user.id, 
+              stars: STAR_VALUES[i] 
+            });
+            console.log(`✅ Vote ajouté: ${user.username} - ${STAR_VALUES[i]}⭐`);
+          }
+        });
+      } catch (error) {
+        console.error(`❌ Erreur lors de la récupération des réactions pour ${EMOJI_NUMBERS[i]}:`, error);
+      }
+    }
+  }
+
+  console.log(`📊 Total des votes récupérés: ${votes.length}`);
+
+  if (votes.length === 0) {
+    return message.reply('❌ Aucun vote enregistré pour ce PLE. Vérifie que des personnes (autres que le bot) ont bien réagi avec les émojis numérotés.');
+  }
+
+  const totalStars = votes.reduce((sum, v) => sum + v.stars, 0);
+  const averageRating = totalStars / votes.length;
+
+  ple.ratings = votes;
+  ple.averageRating = averageRating;
+  ple.isFinalized = true;
+
+  await ple.save();
+
+  const starsDisplay = getStarDisplay(averageRating);
+
+  const votesBreakdown = STAR_VALUES.map((value, i) => {
+    const count = votes.filter(v => v.stars === value).length;
+    return count > 0 ? `${EMOJI_NUMBERS[i]} (${value}⭐) : ${count} vote${count > 1 ? 's' : ''}` : null;
+  }).filter(Boolean).join('\n') || 'Aucun détail disponible';
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📊 Résultats - ${ple.pleName}`)
+    .setDescription(`**${federation.name}**\n\n✅ PLE finalisé avec succès !`)
+    .addFields(
+      { name: '⭐ Note Finale', value: `${starsDisplay} **${averageRating.toFixed(2)}/5**`, inline: true },
+      { name: '🗳️ Votes', value: `${votes.length} personne${votes.length > 1 ? 's' : ''}`, inline: true },
+      { name: '\u200B', value: '\u200B', inline: true },
+      { name: '📈 Répartition des votes', value: votesBreakdown }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: `Finalisé par ${message.author.username}` })
+    .setTimestamp();
+
+  try {
+    const originalEmbed = msg.embeds[0];
+    const updatedEmbed = EmbedBuilder.from(originalEmbed)
+      .setColor(federation.color)
+      .setFields(
+        { name: 'Type', value: '🌟 Premium Live Event' },
+        { name: 'Statut', value: '✅ Finalisé !', inline: true },
+        { name: 'Note Finale', value: `${starsDisplay} ${averageRating.toFixed(2)}/5`, inline: true },
+        { name: 'Votes', value: `${votes.length} personne${votes.length > 1 ? 's' : ''}`, inline: true }
+      );
+    
+    await msg.edit({ embeds: [updatedEmbed] });
+  } catch (error) {
+    console.error('Erreur lors de la mise à jour du message original:', error);
+  }
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ============================================================================
+// COMMANDE: LISTE DES PLEs D'UNE FÉDÉRATION
+// À ajouter après !finalizeple
+// ============================================================================
+
+if (command === 'ples' || command === 'myples') {
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('Tu n\'as pas de fédération.');
+  }
+
+  const ples = await PLE.find({
+    userId: message.author.id,
+    guildId: message.guild.id,
+    isFinalized: true
+  }).sort({ createdAt: -1 });
+
+  if (ples.length === 0) {
+    return message.reply('Tu n\'as aucun PLE finalisé.');
+  }
+
+  const avgRating = ples.reduce((sum, p) => sum + p.averageRating, 0) / ples.length;
+
+  const plesText = ples.slice(0, 10).map((p, i) => {
+    const date = new Date(p.createdAt).toLocaleDateString('fr-FR');
+    const stars = getStarDisplay(p.averageRating);
+    return `**${i + 1}. ${p.pleName}**\n${stars} ${p.averageRating.toFixed(2)}/5 - ${date}`;
+  }).join('\n\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle(`🎭 PLEs de ${federation.name}`)
+    .setDescription(plesText)
+    .addFields(
+      { name: '📊 Total PLEs', value: `${ples.length}`, inline: true },
+      { name: '⭐ Moyenne', value: `${getStarDisplay(avgRating)} ${avgRating.toFixed(2)}/5`, inline: true }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: 'Affichage des 10 derniers PLEs' })
+    .setTimestamp();
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ============================================================================
+// COMMANDE: COMPARER LES PLEs PAR NOM
+// À ajouter après !ples
+// ============================================================================
+
+if (command === 'plecompare' || command === 'pc') {
+  const pleName = args.join(' ');
+  
+  if (!pleName) {
+    return message.reply('Usage: `!plecompare Nom du PLE`\nExemple: !plecompare WrestleMania 41');
+  }
+
+  const ples = await PLE.find({
+    guildId: message.guild.id,
+    pleName: new RegExp(`^${pleName}$`, 'i'),
+    isFinalized: true
+  }).sort({ averageRating: -1 });
+
+  if (ples.length === 0) {
+    return message.reply(`❌ Aucun PLE "${pleName}" finalisé trouvé.`);
+  }
+
+  const plesList = ples.map((p, i) => {
+    const stars = getStarDisplay(p.averageRating);
+    const date = new Date(p.createdAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit', year: 'numeric' });
+    return `**${i + 1}.** ${p.federationName}\n${stars} **${p.averageRating.toFixed(2)}/5** - ${date}`;
+  }).join('\n\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle(`📊 Comparaison - ${pleName}`)
+    .setDescription(`${ples.length} fédération(s) ont réalisé ce PLE`)
+    .addFields({ name: '⭐ Classement par Note', value: plesList })
+    .setColor('#9B59B6')
+    .setFooter({ text: 'Classement par note moyenne décroissante' })
+    .setTimestamp();
+
+  return message.reply({ embeds: [embed] });
+}
+
   // ==========================================================================
   // COMMANDE: FINALISER LES VOTES D'UN SHOW
   // ==========================================================================
@@ -2502,25 +2810,38 @@ const embed = new EmbedBuilder()
       return message.reply('Tu n\'as pas de fédération.');
     }
 
-    const shows = await Show.find({
-      userId: message.author.id,
-      guildId: message.guild.id,
-      isFinalized: true
-    }).sort({ createdAt: -1 });
+const shows = await Show.find({
+  userId: message.author.id,
+  guildId: message.guild.id,
+  isFinalized: true
+}).sort({ createdAt: -1 });
 
-    const avgRating = shows.length > 0 
-      ? shows.reduce((sum, s) => sum + s.averageRating, 0) / shows.length 
-      : 0;
+const ples = await PLE.find({
+  userId: message.author.id,
+  guildId: message.guild.id,
+  isFinalized: true
+}).sort({ createdAt: -1 });
 
-// Top 3 meilleurs shows (au lieu des 3 derniers)
-const topShows = [...shows].sort((a, b) => b.averageRating - a.averageRating).slice(0, 3);
-const showsText = topShows.length > 0
-  ? topShows.map((s, i) => {
-      const date = new Date(s.createdAt).toLocaleDateString('fr-FR');
-      const stars = getStarDisplay(s.averageRating);
-      return `**${i + 1}. Show #${s.showNumber}** - ${date}\n${stars} ${s.averageRating.toFixed(2)}/5`;
+// Combiner et trier par note
+const allEvents = [
+  ...shows.map(s => ({ name: `Show #${s.showNumber}`, rating: s.averageRating, createdAt: s.createdAt, type: 'show' })),
+  ...ples.map(p => ({ name: p.pleName, rating: p.averageRating, createdAt: p.createdAt, type: 'ple' }))
+].sort((a, b) => b.rating - a.rating);
+
+const avgRating = allEvents.length > 0 
+  ? allEvents.reduce((sum, e) => sum + e.rating, 0) / allEvents.length 
+  : 0;
+
+// Top 3 meilleurs events (tous types confondus)
+const topEvents = allEvents.slice(0, 3);
+const eventsText = topEvents.length > 0
+  ? topEvents.map((e, i) => {
+      const date = new Date(e.createdAt).toLocaleDateString('fr-FR');
+      const stars = getStarDisplay(e.rating);
+      const icon = e.type === 'ple' ? '🎭' : '📺';
+      return `**${i + 1}. ${icon} ${e.name}** - ${date}\n${stars} ${e.rating.toFixed(2)}/5`;
     }).join('\n\n')
-  : 'Aucun show finalisé';
+  : 'Aucun event finalisé';
 
 // Champions avec logos
 const belts = await Belt.find({
@@ -2548,7 +2869,11 @@ const championsText = belts.length > 0
         { name: '📺 Shows', value: `${shows.length} complétés`, inline: true },
         { name: '⭐ Moyenne Globale', value: avgRating > 0 ? `${avgStars} ${avgRating.toFixed(2)}/5` : 'N/A', inline: true },
         { name: '📺 TV Rating', value: `${tvRating.toFixed(2)}/10.0 | ${grade}` },
-        { name: '🏆 Top 3 Meilleurs Shows', value: showsText },
+        { name: '🏆 Top 3 Meilleurs Events', value: eventsText },
+        { 
+  name: '📊 Statistiques Events', 
+  value: `📺 ${shows.length} shows | 🎭 ${ples.length} PLEs` 
+},
         { name: '👑 Champions', value: championsText }
       )
       .setColor(federation.color)
