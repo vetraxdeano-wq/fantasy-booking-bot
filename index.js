@@ -65,13 +65,15 @@ const wrestlerSchema = new mongoose.Schema({
     fedName: String, 
     sharedAt: { type: Date, default: Date.now } 
   }],
-  matchHistory: [{
-    opponent: String,
-    result: String,
-    federationName: String,
-    showNumber: Number,
-    date: { type: Date, default: Date.now }
-  }],
+matchHistory: [{
+  opponent: String,
+  result: String,
+  federationName: String,
+  showNumber: Number,
+  pleName: String, // ⭐ NOUVEAU : Nom du PLE
+  eventType: String, // ⭐ NOUVEAU : 'show' ou 'ple'
+  date: { type: Date, default: Date.now }
+}],
   titleHistory: [{
     beltName: String,
     federationName: String,
@@ -1202,118 +1204,172 @@ if (wrestler2) {
   // COMMANDE: AJOUTER UNE VICTOIRE
   // ==========================================================================
   
-  if (command === 'addwin') {
-    const wrestlerName = args.join(' ');
-    
-    if (!wrestlerName) {
-      return message.reply('Usage: `!addwin Nom du Lutteur`');
-    }
-
-    const federation = await Federation.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
-
-    if (!federation) {
-      return message.reply('❌ Tu n\'as pas de fédération.');
-    }
-
-    // Vérifier que le lutteur est dans ton roster
-    const inRoster = federation.roster.find(w => 
-      w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
-    );
-
-    if (!inRoster) {
-      return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
-    }
-
-    const wrestler = await Wrestler.findOne({
-      name: new RegExp(`^${wrestlerName}$`, 'i'),
-      guildId: message.guild.id
-    });
-
-    if (!wrestler) {
-      return message.reply(`❌ Lutteur introuvable dans la base de données.`);
-    }
-
-    wrestler.wins += 1;
-    await wrestler.save();
-
-    const record = `${wrestler.wins}-${wrestler.losses}`;
-    const winRate = wrestler.wins + wrestler.losses > 0 
-      ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
-      : 0;
-
-    const embed = new EmbedBuilder()
-      .setTitle('✅ Victoire Ajoutée !')
-      .setDescription(`**${wrestler.name}**`)
-      .addFields(
-        { name: 'Record', value: record, inline: true },
-        { name: 'Taux de Victoire', value: `${winRate}%`, inline: true }
-      )
-      .setColor(federation.color)
-      .setFooter({ text: `${federation.name}` });
-
-    return message.reply({ embeds: [embed] });
+if (command === 'addwin') {
+  const wrestlerName = args.join(' ');
+  
+  if (!wrestlerName) {
+    return message.reply('Usage: `!addwin Nom du Lutteur`');
   }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération.');
+  }
+
+  // Vérifier que le lutteur est dans ton roster
+  const inRoster = federation.roster.find(w => 
+    w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+  );
+
+  if (!inRoster) {
+    return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
+  }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ Lutteur introuvable dans la base de données.`);
+  }
+
+  // Déterminer le dernier event (Show ou PLE)
+  const lastShow = await Show.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ createdAt: -1 });
+
+  const lastPLE = await PLE.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ createdAt: -1 });
+
+  let eventInfo = { type: 'show', name: 'N/A', number: 0 };
+
+  if (!lastShow && !lastPLE) {
+    return message.reply('❌ Tu dois d\'abord créer un show avec `!showend` ou un PLE avec `!pleend`.');
+  }
+
+  // Comparer les dates pour savoir quel est le plus récent
+  if (lastPLE && (!lastShow || new Date(lastPLE.createdAt) > new Date(lastShow.createdAt))) {
+    eventInfo = { type: 'ple', name: lastPLE.pleName, number: null };
+  } else if (lastShow) {
+    eventInfo = { type: 'show', name: `Show #${lastShow.showNumber}`, number: lastShow.showNumber };
+  }
+
+  wrestler.wins += 1;
+  await wrestler.save();
+
+  const record = `${wrestler.wins}-${wrestler.losses}`;
+  const winRate = wrestler.wins + wrestler.losses > 0 
+    ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
+    : 0;
+
+  const eventIcon = eventInfo.type === 'ple' ? '🎭' : '📺';
+
+  const embed = new EmbedBuilder()
+    .setTitle('✅ Victoire Ajoutée !')
+    .setDescription(`**${wrestler.name}**`)
+    .addFields(
+      { name: 'Record', value: record, inline: true },
+      { name: 'Taux de Victoire', value: `${winRate}%`, inline: true },
+      { name: 'Event', value: `${eventIcon} ${eventInfo.name}`, inline: true }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: `${federation.name}` });
+
+  return message.reply({ embeds: [embed] });
+}
 
   // ==========================================================================
   // COMMANDE: AJOUTER UNE DÉFAITE
   // ==========================================================================
   
-  if (command === 'addloss') {
-    const wrestlerName = args.join(' ');
-    
-    if (!wrestlerName) {
-      return message.reply('Usage: `!addloss Nom du Lutteur`');
-    }
-
-    const federation = await Federation.findOne({
-      userId: message.author.id,
-      guildId: message.guild.id
-    });
-
-    if (!federation) {
-      return message.reply('❌ Tu n\'as pas de fédération.');
-    }
-
-    const inRoster = federation.roster.find(w => 
-      w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
-    );
-
-    if (!inRoster) {
-      return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
-    }
-
-    const wrestler = await Wrestler.findOne({
-      name: new RegExp(`^${wrestlerName}$`, 'i'),
-      guildId: message.guild.id
-    });
-
-    if (!wrestler) {
-      return message.reply(`❌ Lutteur introuvable dans la base de données.`);
-    }
-
-    wrestler.losses += 1;
-    await wrestler.save();
-
-    const record = `${wrestler.wins}-${wrestler.losses}`;
-    const winRate = wrestler.wins + wrestler.losses > 0 
-      ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
-      : 0;
-
-    const embed = new EmbedBuilder()
-      .setTitle('❌ Défaite Ajoutée')
-      .setDescription(`**${wrestler.name}**`)
-      .addFields(
-        { name: 'Record', value: record, inline: true },
-        { name: 'Taux de Victoire', value: `${winRate}%`, inline: true }
-      )
-      .setColor(federation.color)
-      .setFooter({ text: `${federation.name}` });
-
-    return message.reply({ embeds: [embed] });
+if (command === 'addloss') {
+  const wrestlerName = args.join(' ');
+  
+  if (!wrestlerName) {
+    return message.reply('Usage: `!addloss Nom du Lutteur`');
   }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération.');
+  }
+
+  const inRoster = federation.roster.find(w => 
+    w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+  );
+
+  if (!inRoster) {
+    return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
+  }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ Lutteur introuvable dans la base de données.`);
+  }
+
+  // Déterminer le dernier event (Show ou PLE)
+  const lastShow = await Show.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ createdAt: -1 });
+
+  const lastPLE = await PLE.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ createdAt: -1 });
+
+  let eventInfo = { type: 'show', name: 'N/A', number: 0 };
+
+  if (!lastShow && !lastPLE) {
+    return message.reply('❌ Tu dois d\'abord créer un show avec `!showend` ou un PLE avec `!pleend`.');
+  }
+
+  // Comparer les dates pour savoir quel est le plus récent
+  if (lastPLE && (!lastShow || new Date(lastPLE.createdAt) > new Date(lastShow.createdAt))) {
+    eventInfo = { type: 'ple', name: lastPLE.pleName, number: null };
+  } else if (lastShow) {
+    eventInfo = { type: 'show', name: `Show #${lastShow.showNumber}`, number: lastShow.showNumber };
+  }
+
+  wrestler.losses += 1;
+  await wrestler.save();
+
+  const record = `${wrestler.wins}-${wrestler.losses}`;
+  const winRate = wrestler.wins + wrestler.losses > 0 
+    ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
+    : 0;
+
+  const eventIcon = eventInfo.type === 'ple' ? '🎭' : '📺';
+
+  const embed = new EmbedBuilder()
+    .setTitle('❌ Défaite Ajoutée')
+    .setDescription(`**${wrestler.name}**`)
+    .addFields(
+      { name: 'Record', value: record, inline: true },
+      { name: 'Taux de Victoire', value: `${winRate}%`, inline: true },
+      { name: 'Event', value: `${eventIcon} ${eventInfo.name}`, inline: true }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: `${federation.name}` });
+
+  return message.reply({ embeds: [embed] });
+}
 
   // ==========================================================================
   // COMMANDE: RETIRER UNE VICTOIRE
@@ -1493,14 +1549,28 @@ if (command === 'match') {
     return message.reply('❌ Tu n\'as pas de fédération.');
   }
 
-  const lastShow = await Show.findOne({
-    userId: message.author.id,
-    guildId: message.guild.id
-  }).sort({ showNumber: -1 });
+const lastShow = await Show.findOne({
+  userId: message.author.id,
+  guildId: message.guild.id
+}).sort({ createdAt: -1 });
 
-  if (!lastShow) {
-    return message.reply('❌ Tu dois d\'abord créer un show avec `!showend`.');
-  }
+const lastPLE = await PLE.findOne({
+  userId: message.author.id,
+  guildId: message.guild.id
+}).sort({ createdAt: -1 });
+
+if (!lastShow && !lastPLE) {
+  return message.reply('❌ Tu dois d\'abord créer un show avec `!showend` ou un PLE avec `!pleend`.');
+}
+
+// Déterminer quel event est le plus récent
+let eventInfo = { type: 'show', name: 'Show', number: 0 };
+
+if (lastPLE && (!lastShow || new Date(lastPLE.createdAt) > new Date(lastShow.createdAt))) {
+  eventInfo = { type: 'ple', name: lastPLE.pleName, number: null };
+} else if (lastShow) {
+  eventInfo = { type: 'show', name: federation.name, number: lastShow.showNumber };
+}
 
   // Traiter chaque équipe/lutteur
   const processedWrestlers = [];
@@ -1532,14 +1602,15 @@ if (command === 'match') {
         .map(t => t.name)
         .join(' vs ');
 
-      wrestler.matchHistory.push({
-        opponent: opponentNames,
-        result: team.isWinner ? 'win' : 'loss',
-        federationName: federation.name,
-        showNumber: lastShow.showNumber,
-        date: new Date()
-      });
-
+wrestler.matchHistory.push({
+  opponent: opponentNames,
+  result: team.isWinner ? 'win' : 'loss',
+  federationName: federation.name,
+  showNumber: eventInfo.type === 'show' ? eventInfo.number : null,
+  pleName: eventInfo.type === 'ple' ? eventInfo.name : null,
+  eventType: eventInfo.type,
+  date: new Date()
+});
       await wrestler.save();
       processedWrestlers.push({ wrestler, isWinner: team.isWinner });
     }
@@ -1566,9 +1637,14 @@ if (command === 'match') {
       }).join(' & ')
     ).join(' vs ');
 
-  const embed = new EmbedBuilder()
-    .setTitle(`${matchTypeText} Enregistré !`)
-    .setDescription(`**${federation.name}** - Show #${lastShow.showNumber}`)
+const eventIcon = eventInfo.type === 'ple' ? '🎭' : '📺';
+const eventText = eventInfo.type === 'ple' 
+  ? eventInfo.name 
+  : `Show #${eventInfo.number}`;
+
+const embed = new EmbedBuilder()
+  .setTitle(`${matchTypeText} Enregistré !`)
+  .setDescription(`**${federation.name}** - ${eventIcon} ${eventText}`)
     .addFields(
       { name: '🏆 Vainqueur(s)', value: winnersText },
       { name: '❌ Perdant(s)', value: losersText }
@@ -1603,15 +1679,23 @@ if (command === 'matchs') {
     return message.reply(`${wrestler.name} n'a aucun match enregistré.`);
   }
 
-  const matchesText = wrestler.matchHistory
-    .sort((a, b) => new Date(b.date) - new Date(a.date))
-    .map((match, i) => {
-      const resultIcon = match.result === 'win' ? '✅' : '❌';
-      const resultText = match.result === 'win' ? 'VICTOIRE' : 'DÉFAITE';
-      const date = new Date(match.date).toLocaleDateString('fr-FR');
-      return `**${i + 1}.** ${resultIcon} ${resultText} vs **${match.opponent}**\n📺 ${match.federationName} - Show #${match.showNumber} (${date})`;
-    }).join('\n\n');
-
+const matchesText = wrestler.matchHistory
+  .sort((a, b) => new Date(b.date) - new Date(a.date))
+  .map((match, i) => {
+    const resultIcon = match.result === 'win' ? '✅' : '❌';
+    const resultText = match.result === 'win' ? 'VICTOIRE' : 'DÉFAITE';
+    const date = new Date(match.date).toLocaleDateString('fr-FR');
+    
+    // Déterminer le type d'event
+    let eventText;
+    if (match.eventType === 'ple' || match.pleName) {
+      eventText = `🎭 ${match.pleName || 'PLE'}`;
+    } else {
+      eventText = `📺 ${match.federationName} - Show #${match.showNumber}`;
+    }
+    
+    return `**${i + 1}.** ${resultIcon} ${resultText} vs **${match.opponent}**\n${eventText} (${date})`;
+  }).join('\n\n');
   const record = `${wrestler.wins}-${wrestler.losses}`;
   const winRate = wrestler.wins + wrestler.losses > 0 
     ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
@@ -1627,6 +1711,84 @@ if (command === 'matchs') {
 
   return message.reply({ embeds: [embed] });
 }
+
+    // ==========================================================================
+  // COMMANDE: SUPPRIMER LE DERNIER MATCH D'UN LUTTEUR
+  // ==========================================================================
+  
+  if (command === 'dellast') {
+    const wrestlerName = args.join(' ');
+    
+    if (!wrestlerName) {
+      return message.reply('Usage: `!dellast Nom du Lutteur`\nExemple: !dellast John Cena');
+    }
+
+    const federation = await Federation.findOne({
+      userId: message.author.id,
+      guildId: message.guild.id
+    });
+
+    if (!federation) {
+      return message.reply('❌ Tu n\'as pas de fédération.');
+    }
+
+    const wrestler = await Wrestler.findOne({
+      name: new RegExp(`^${wrestlerName}$`, 'i'),
+      guildId: message.guild.id
+    });
+
+    if (!wrestler) {
+      return message.reply(`❌ ${wrestlerName} n'existe pas dans cette ligue.`);
+    }
+
+    if (!wrestler.matchHistory || wrestler.matchHistory.length === 0) {
+      return message.reply(`❌ ${wrestler.name} n'a aucun match enregistré.`);
+    }
+
+    // Récupérer le dernier match
+    const sortedMatches = wrestler.matchHistory.sort((a, b) => new Date(b.date) - new Date(a.date));
+    const lastMatch = sortedMatches[0];
+
+    // Déterminer le type d'event du match à supprimer
+    let eventText;
+    if (lastMatch.eventType === 'ple' || lastMatch.pleName) {
+      eventText = `🎭 ${lastMatch.pleName || 'PLE'}`;
+    } else {
+      eventText = `📺 Show #${lastMatch.showNumber}`;
+    }
+
+    const matchResult = lastMatch.result === 'win' ? 'Victoire' : 'Défaite';
+
+    // Supprimer le match de l'historique
+    wrestler.matchHistory = wrestler.matchHistory.filter(m => m !== lastMatch);
+
+    // Ajuster les statistiques
+    if (lastMatch.result === 'win') {
+      wrestler.wins = Math.max(0, wrestler.wins - 1);
+    } else {
+      wrestler.losses = Math.max(0, wrestler.losses - 1);
+    }
+
+    await wrestler.save();
+
+    const newRecord = `${wrestler.wins}-${wrestler.losses}`;
+    const winRate = wrestler.wins + wrestler.losses > 0 
+      ? ((wrestler.wins / (wrestler.wins + wrestler.losses)) * 100).toFixed(1)
+      : 0;
+
+    const embed = new EmbedBuilder()
+      .setTitle('🗑️ Dernier Match Supprimé')
+      .setDescription(`**${wrestler.name}**`)
+      .addFields(
+        { name: 'Match Supprimé', value: `${matchResult} vs **${lastMatch.opponent}**\n${eventText}` },
+        { name: 'Nouveau Record', value: newRecord, inline: true },
+        { name: 'Win Rate', value: `${winRate}%`, inline: true }
+      )
+      .setColor(federation.color)
+      .setFooter({ text: `${federation.name}` });
+
+    return message.reply({ embeds: [embed] });
+  }
 
   // ==========================================================================
   // COMMANDE: AJOUTER UNE DÉFENSE DE TITRE
