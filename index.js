@@ -2893,97 +2893,153 @@ const championsText = belts.length > 0
   // COMMANDE: POWER RANKING
   // ==========================================================================
   
-  if (command === 'power-ranking' || command === 'pr') {
-    const period = args[0]?.toLowerCase() || '30';
-    
-    if (!['7', '30', 'all'].includes(period)) {
-      return message.reply('Usage: `!power-ranking [7|30|all]`\nExemple: !power-ranking 7');
-    }
+if (command === 'power-ranking' || command === 'pr') {
+  const period = args[0]?.toLowerCase() || '30';
+  const eventType = args[1]?.toLowerCase(); // 'shows', 'ples', ou undefined (all)
+  
+  if (!['7', '30', 'all'].includes(period)) {
+    return message.reply(
+      'Usage: `!power-ranking [7|30|all] [shows|ples]`\n' +
+      'Exemples:\n' +
+      '• `!power-ranking 30` - Tous les events des 30 derniers jours\n' +
+      '• `!power-ranking 7 shows` - Seulement les shows des 7 derniers jours\n' +
+      '• `!power-ranking all ples` - Tous les PLEs depuis le début'
+    );
+  }
 
-    let dateFilter = {};
-    let periodText = '';
+  let dateFilter = {};
+  let periodText = '';
 
-    if (period === '7') {
-      const sevenDaysAgo = new Date();
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-      dateFilter = { createdAt: { $gte: sevenDaysAgo } };
-      periodText = '7 derniers jours';
-    } else if (period === '30') {
-      const thirtyDaysAgo = new Date();
-      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-      dateFilter = { createdAt: { $gte: thirtyDaysAgo } };
-      periodText = '30 derniers jours';
-    } else {
-      periodText = 'Depuis le début';
-    }
+  if (period === '7') {
+    const sevenDaysAgo = new Date();
+    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+    dateFilter = { createdAt: { $gte: sevenDaysAgo } };
+    periodText = '7 derniers jours';
+  } else if (period === '30') {
+    const thirtyDaysAgo = new Date();
+    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    dateFilter = { createdAt: { $gte: thirtyDaysAgo } };
+    periodText = '30 derniers jours';
+  } else {
+    periodText = 'Depuis le début';
+  }
 
+  let allEvents = [];
+
+  // Charger les shows si demandé
+  if (!eventType || eventType === 'shows') {
     const shows = await Show.find({
       guildId: message.guild.id,
       isFinalized: true,
       ...dateFilter
-    }).sort({ averageRating: -1 });
-
-    // Top 5 meilleurs shows
-    const topShows = shows.slice(0, 5);
-    const topShowsText = topShows.length > 0
-      ? topShows.map((s, i) => {
-          const stars = getStarDisplay(s.averageRating);
-          const date = new Date(s.createdAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
-          return `**${i + 1}.** ${s.federationName} - Show #${s.showNumber}\n${stars} ${s.averageRating.toFixed(2)}/5 (${date})`;
-        }).join('\n\n')
-      : 'Aucun show';
-
-    // Top 3 fédérations (min 2 shows)
-    const fedStats = {};
-    
-    for (const show of shows) {
-      if (!fedStats[show.federationName]) {
-        fedStats[show.federationName] = {
-          total: 0,
-          count: 0,
-          userId: show.userId
-        };
-      }
-      fedStats[show.federationName].total += show.averageRating;
-      fedStats[show.federationName].count += 1;
-    }
-
-    const topFeds = Object.entries(fedStats)
-      .filter(([_, stats]) => stats.count >= 2)
-      .map(([name, stats]) => ({
-        name,
-        average: stats.total / stats.count,
-        count: stats.count,
-        userId: stats.userId
-      }))
-      .sort((a, b) => b.average - a.average)
-      .slice(0, 3);
-
-    const topFedsText = topFeds.length > 0
-      ? topFeds.map((f, i) => {
-          const stars = getStarDisplay(f.average);
-          return `**${i + 1}.** ${f.name}\n${stars} ${f.average.toFixed(2)}/5 (${f.count} shows)`;
-        }).join('\n\n')
-      : 'Aucune fédération (min 2 shows)';
-
-    // Stats globales
-    const totalShows = shows.length;
-    const uniqueFeds = new Set(shows.map(s => s.federationName)).size;
-
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 Power Rankings')
-      .setDescription(`**Période:** ${periodText}`)
-      .addFields(
-        { name: '📊 Stats Globales', value: `${totalShows} shows | ${uniqueFeds} fédérations actives` },
-        { name: '⭐ Top 5 Meilleurs Shows', value: topShowsText },
-        { name: '🎖️ Top 3 Fédérations', value: topFedsText }
-      )
-      .setColor('#FFD700')
-      .setFooter({ text: 'Utilisez !pr 7, !pr 30 ou !pr all' })
-      .setTimestamp();
-
-    return message.reply({ embeds: [embed] });
+    });
+    allEvents.push(...shows.map(s => ({
+      name: `Show #${s.showNumber}`,
+      federationName: s.federationName,
+      userId: s.userId,
+      rating: s.averageRating,
+      createdAt: s.createdAt,
+      type: 'show',
+      votes: s.ratings?.length || 0
+    })));
   }
+
+  // Charger les PLEs si demandé
+  if (!eventType || eventType === 'ples') {
+    const ples = await PLE.find({
+      guildId: message.guild.id,
+      isFinalized: true,
+      ...dateFilter
+    });
+    allEvents.push(...ples.map(p => ({
+      name: p.pleName,
+      federationName: p.federationName,
+      userId: p.userId,
+      rating: p.averageRating,
+      createdAt: p.createdAt,
+      type: 'ple',
+      votes: p.ratings?.length || 0
+    })));
+  }
+
+  // Trier par note décroissante
+  allEvents.sort((a, b) => b.rating - a.rating);
+
+  // Top 5 meilleurs events
+  const topEvents = allEvents.slice(0, 5);
+  const topEventsText = topEvents.length > 0
+    ? topEvents.map((e, i) => {
+        const stars = getStarDisplay(e.rating);
+        const date = new Date(e.createdAt).toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+        const icon = e.type === 'ple' ? '🎭' : '📺';
+        return `**${i + 1}.** ${icon} ${e.federationName} - ${e.name}\n${stars} ${e.rating.toFixed(2)}/5 (${date})`;
+      }).join('\n\n')
+    : 'Aucun event';
+
+  // Top 3 fédérations (min 2 events)
+  const fedStats = {};
+  
+  for (const event of allEvents) {
+    if (!fedStats[event.federationName]) {
+      fedStats[event.federationName] = {
+        total: 0,
+        count: 0,
+        userId: event.userId,
+        shows: 0,
+        ples: 0
+      };
+    }
+    fedStats[event.federationName].total += event.rating;
+    fedStats[event.federationName].count += 1;
+    if (event.type === 'show') {
+      fedStats[event.federationName].shows += 1;
+    } else {
+      fedStats[event.federationName].ples += 1;
+    }
+  }
+
+  const topFeds = Object.entries(fedStats)
+    .filter(([_, stats]) => stats.count >= 2)
+    .map(([name, stats]) => ({
+      name,
+      average: stats.total / stats.count,
+      count: stats.count,
+      shows: stats.shows,
+      ples: stats.ples,
+      userId: stats.userId
+    }))
+    .sort((a, b) => b.average - a.average)
+    .slice(0, 3);
+
+  const topFedsText = topFeds.length > 0
+    ? topFeds.map((f, i) => {
+        const stars = getStarDisplay(f.average);
+        return `**${i + 1}.** ${f.name}\n${stars} ${f.average.toFixed(2)}/5 (${f.shows} shows, ${f.ples} PLEs)`;
+      }).join('\n\n')
+    : 'Aucune fédération (min 2 events)';
+
+  // Stats globales
+  const totalEvents = allEvents.length;
+  const totalShows = allEvents.filter(e => e.type === 'show').length;
+  const totalPLEs = allEvents.filter(e => e.type === 'ple').length;
+  const uniqueFeds = new Set(allEvents.map(e => e.federationName)).size;
+
+  const typeText = !eventType ? 'Tous les events' : eventType === 'shows' ? 'Shows uniquement' : 'PLEs uniquement';
+
+  const embed = new EmbedBuilder()
+    .setTitle('🏆 Power Rankings')
+    .setDescription(`**Période:** ${periodText}\n**Type:** ${typeText}`)
+    .addFields(
+      { name: '📊 Stats Globales', value: `${totalEvents} events (${totalShows} shows, ${totalPLEs} PLEs) | ${uniqueFeds} fédérations actives` },
+      { name: '⭐ Top 5 Meilleurs Events', value: topEventsText },
+      { name: '🎖️ Top 3 Fédérations', value: topFedsText }
+    )
+    .setColor('#FFD700')
+    .setFooter({ text: 'Utilisez !pr [7/30/all] [shows/ples]' })
+    .setTimestamp();
+
+  return message.reply({ embeds: [embed] });
+}
 
   // ============================================================================
 // 1. POWER RANKING INDIVIDUEL DES LUTTEURS (TOP 5)
