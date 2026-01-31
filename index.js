@@ -23,6 +23,25 @@ const client = new Client({
 });
 
 // ============================================================================
+// GESTION DES ERREURS GLOBALES
+// ============================================================================
+
+// Gérer les erreurs non capturées du client Discord
+client.on('error', error => {
+  console.error('❌ Erreur Discord Client:', error);
+});
+
+// Gérer les rejets de promesses non gérés
+process.on('unhandledRejection', (error) => {
+  console.error('❌ Unhandled Promise Rejection:', error);
+});
+
+// Gérer les exceptions non capturées
+process.on('uncaughtException', (error) => {
+  console.error('❌ Uncaught Exception:', error);
+});
+
+// ============================================================================
 // CONNEXION MONGODB
 // ============================================================================
 
@@ -2095,7 +2114,7 @@ if (command === 'roster') {
     const bookeurRole = message.guild.roles.cache.find(r => r.name === 'Bookeur');
     const mention = bookeurRole ? `${bookeurRole}` : '';
 
-    const msg = await message.reply({ 
+    const msg = await message.channel.send({ 
       content: mention ? `${mention} Nouveau show à noter !` : undefined,
       embeds: [embed] 
     });
@@ -2159,7 +2178,7 @@ if (command === 'pleend') {
   const bookeurRole = message.guild.roles.cache.find(r => r.name === 'Bookeur');
   const mention = bookeurRole ? `${bookeurRole}` : '';
 
-  const msg = await message.reply({ 
+  const msg = await message.channel.send({ 
     content: mention ? `${mention} Nouveau PLE à noter !` : undefined,
     embeds: [embed] 
   });
