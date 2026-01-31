@@ -493,7 +493,14 @@ function getTVRatingGrade(rating) {
 // ============================================================================
 
 client.on('ready', async () => {
-  console.log(`🤼 Bot Fantasy Booking connecté : ${client.user.tag}`);
+  console.log('\n========================================');
+  console.log('🤼 Bot Fantasy Booking connecté !');
+  console.log('========================================');
+  console.log(`👤 Nom: ${client.user.tag}`);
+  console.log(`🆔 ID: ${client.user.id}`);
+  console.log(`🏟️  Serveurs: ${client.guilds.cache.size}`);
+  console.log(`👥 Utilisateurs: ${client.users.cache.size}`);
+  console.log('========================================\n');
 });
 
 // ============================================================================
@@ -3961,8 +3968,26 @@ const server = http.createServer((req, res) => {
   res.writeHead(200);
   res.end('Bot Discord Fantasy Booking actif');
 }).listen(PORT, () => {
-  console.log(`🌐 Serveur sur le port ${PORT}`);
+  console.log(`🌐 Serveur HTTP sur le port ${PORT}`);
   keepAlive();
 });
 
-client.login(process.env.DISCORD_TOKEN);
+// Login Discord avec gestion d'erreur améliorée
+console.log('🔐 Tentative de connexion à Discord...');
+if (!process.env.DISCORD_TOKEN) {
+  console.error('❌ DISCORD_TOKEN non défini dans les variables d\'environnement !');
+  process.exit(1);
+}
+
+client.login(process.env.DISCORD_TOKEN)
+  .then(() => console.log('✅ Requête de login envoyée à Discord'))
+  .catch(err => {
+    console.error('❌ ERREUR CRITIQUE lors du login Discord:');
+    console.error('Message:', err.message);
+    console.error('Code:', err.code);
+    console.error('\nVérifiez:');
+    console.error('1. Que votre DISCORD_TOKEN est valide');
+    console.error('2. Que les intents sont activés dans le Discord Developer Portal');
+    console.error('3. Que le bot n\'a pas été supprimé');
+    process.exit(1);
+  });
