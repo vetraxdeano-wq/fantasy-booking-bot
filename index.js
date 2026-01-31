@@ -508,11 +508,13 @@ client.on('ready', async () => {
 // ============================================================================
 
 client.on('messageCreate', async message => {
-  if (message.author.bot) return;
-  if (!message.content.startsWith('!')) return;
+  // Wrapper try-catch global pour éviter les crashs
+  try {
+    if (message.author.bot) return;
+    if (!message.content.startsWith('!')) return;
 
-  const args = message.content.slice(1).trim().split(/ +/);
-  const command = args.shift().toLowerCase();
+    const args = message.content.slice(1).trim().split(/ +/);
+    const command = args.shift().toLowerCase();
 
   // ==========================================================================
   // COMMANDE: CRÉER UNE FÉDÉRATION
@@ -3957,6 +3959,25 @@ if (command === 'help2') {
 
   return message.reply({ embeds: [embed] });
 }
+  } catch (error) {
+    // Capturer toutes les erreurs pour éviter le crash du bot
+    console.error('========================================');
+    console.error('❌ ERREUR DANS UNE COMMANDE');
+    console.error('========================================');
+    console.error('Commande:', message.content);
+    console.error('Utilisateur:', message.author.tag);
+    console.error('Serveur:', message.guild?.name || 'DM');
+    console.error('Erreur:', error.message);
+    console.error('Stack:', error.stack);
+    console.error('========================================\n');
+    
+    // Informer l'utilisateur
+    try {
+      await message.reply(`❌ Une erreur est survenue lors de l'exécution de cette commande. L'erreur a été enregistrée.\n\`\`\`${error.message}\`\`\``);
+    } catch (replyError) {
+      console.error('Impossible d\'envoyer le message d\'erreur:', replyError.message);
+    }
+  }
 });
 
 // ============================================================================
