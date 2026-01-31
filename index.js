@@ -3915,6 +3915,480 @@ if (command === 'delwikipedia' || command === 'delwiki') {
 
   return message.reply({ embeds: [embed] });
 }
+
+    // ============================================================================
+// COMMANDES DE GESTION DES SHOWS - VERSION AMÉLIORÉE
+// Gère les shows par fédération avec affichage complet
+// ============================================================================
+
+// ==========================================================================
+// COMMANDE: VOIR TOUS LES SHOWS DU SERVEUR (Admin)
+// ==========================================================================
+
+if (command === 'allshows' || command === 'servershow') {
+  if (!message.member.permissions.has('Administrator')) {
+    return message.reply('❌ Commande réservée aux administrateurs.');
+  }
+
+  // Récupérer TOUS les shows du serveur
+  const allShows = await Show.find({
+    guildId: message.guild.id
+  }).sort({ createdAt: -1 }); // Du plus récent au plus ancien
+
+  if (allShows.length === 0) {
+    return message.reply('📺 Aucun show n\'a encore été créé sur ce serveur.');
+  }
+
+  // Récupérer toutes les fédérations pour avoir les noms
+  const allFeds = await Federation.find({
+    guildId: message.guild.id
+  });
+
+  // Créer un map userId -> nom de fédération
+  const fedMap = {};
+  allFeds.forEach(fed => {
+    fedMap[fed.userId] = fed.name;
+  });
+
+  const itemsPerPage = 10;
+  const totalPages = Math.ceil(allShows.length / itemsPerPage);
+  let currentPage = 0;
+
+  const generateEmbed = (page) => {
+    const start = page * itemsPerPage;
+    const end = start + itemsPerPage;
+    const pageShows = allShows.slice(start, end);
+
+    const showsList = pageShows.map((s, index) => {
+      const fedName = fedMap[s.userId] || 'Fédération inconnue';
+      const status = s.isFinalized ? '✅' : '⏳';
+      const rating = s.averageRating > 0 ? `${s.averageRating.toFixed(2)}⭐` : 'N/A';
+      const votes = s.ratings?.length || 0;
+      const date = s.createdAt.toLocaleDateString('fr-FR', { 
+        day: '2-digit', 
+        month: '2-digit',
+        hour: '2-digit',
+        minute: '2-digit'
+      });
+      
+      return `**${start + index + 1}.** ${status} **${fedName}** - Show #${s.showNumber}\n` +
+             `    └ ${rating} (${votes} votes) | ${date} | ID: \`${s._id.toString().slice(-6)}\``;
+    }).join('\n\n');
+
+    const embed = new EmbedBuilder()
+      .setTitle('📺 Tous les Shows du Serveur')
+      .setDescription(showsList || 'Aucun show')
+      .addFields(
+        { name: 'Total Shows', value: `${allShows.length}`, inline: true },
+        { name: 'Fédérations Actives', value: `${allFeds.length}`, inline: true }
+      )
+      .setColor('#3498DB')
+      .setFooter({ 
+        text: `Page ${page + 1}/${totalPages} • Utilisez !delshowid <ID> pour supprimer` 
+      });
+
+    return embed;
+  };
+
+  const row = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('previous')
+        .setLabel('◀️ Précédent')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(currentPage === 0),
+      new ButtonBuilder()
+        .setCustomId('next')
+        .setLabel('Suivant ▶️')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(totalPages <= 1)
+    );
+
+  const embedMessage = await message.reply({
+    embeds: [generateEmbed(currentPage)],
+    components: totalPages > 1 ? [row] : []
+  });
+
+  if (totalPages <= 1) return;
+
+  const collector = embedMessage.createMessageComponentCollector({
+    time: 180000 // 3 minutes
+  });
+
+  collector.on('collect', async interaction => {
+    if (interaction.user.id !== message.author.id) {
+      return interaction.reply({ 
+        content: 'Seul l\'admin qui a lancé la commande peut naviguer !', 
+        ephemeral: true 
+      });
+    }
+
+    if (interaction.customId === 'previous') {
+      currentPage = Math.max(0, currentPage - 1);
+    } else if (interaction.customId === 'next') {
+      currentPage = Math.min(totalPages - 1, currentPage + 1);
+    }
+
+    const updatedRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('previous')
+          .setLabel('◀️ Précédent')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(currentPage === 0),
+        new ButtonBuilder()
+          .setCustomId('next')
+          .setLabel('Suivant ▶️')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(currentPage === totalPages - 1)
+      );
+
+    await interaction.update({
+      embeds: [generateEmbed(currentPage)],
+      components: [updatedRow]
+    });
+  });
+
+  collector.on('end', () => {
+    embedMessage.edit({ components: [] }).catch(() => {});
+  });
+}
+
+// ==========================================================================
+// COMMANDE: SUPPRIMER UN SHOW PAR SON ID (Admin)
+// ==========================================================================
+
+if (command === 'delshowid') {
+  if (!message.member.permissions.has('Administrator')) {
+    return message.reply('❌ Commande réservée aux administrateurs.');
+  }
+
+  const showId = args[0];
+
+  if (!showId) {
+    return message.reply(
+      'Usage: `!delshowid <ID>`\n\n' +
+      'Exemples:\n' +
+      '• `!delshowid a1b2c3` - Supprime le show avec cet ID\n\n' +
+      '💡 Utilisez `!allshows` pour voir les IDs'
+    );
+  }
+
+  // Chercher le show par les 6 derniers caractères de l'ID
+  const shows = await Show.find({
+    guildId: message.guild.id
+  });
+
+  const show = shows.find(s => s._id.toString().endsWith(showId));
+
+  if (!show) {
+    return message.reply(
+      `❌ Aucun show trouvé avec l'ID \`${showId}\`\n\n` +
+      '💡 Utilisez `!allshows` pour voir tous les IDs disponibles'
+    );
+  }
+
+  const federation = await Federation.findOne({
+    userId: show.userId,
+    guildId: message.guild.id
+  });
+
+  const fedName = federation?.name || 'Fédération inconnue';
+
+  // Supprimer le show
+  await Show.deleteOne({ _id: show._id });
+
+  const embed = new EmbedBuilder()
+    .setTitle('🗑️ Show Supprimé')
+    .addFields(
+      { name: 'Fédération', value: fedName, inline: true },
+      { name: 'Show', value: `#${show.showNumber}`, inline: true },
+      { name: 'Note', value: show.averageRating > 0 ? `${show.averageRating.toFixed(2)}⭐` : 'N/A', inline: true },
+      { name: 'Votes', value: `${show.ratings?.length || 0}`, inline: true },
+      { name: 'ID', value: `\`${show._id.toString().slice(-6)}\``, inline: true },
+      { name: 'Date', value: show.createdAt.toLocaleDateString('fr-FR'), inline: true }
+    )
+    .setColor('#E74C3C')
+    .setFooter({ text: 'Cette action est irréversible' });
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ==========================================================================
+// COMMANDE: VOIR LES SHOWS DE TA FÉDÉRATION
+// ==========================================================================
+
+if (command === 'myshows' || command === 'shows') {
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération. Utilise `!createfed`');
+  }
+
+  const shows = await Show.find({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ showNumber: 1 }); // Tri par numéro croissant
+
+  if (shows.length === 0) {
+    return message.reply(`📺 **${federation.name}** n'a pas encore de shows enregistrés.`);
+  }
+
+  const itemsPerPage = 10;
+  const totalPages = Math.ceil(shows.length / itemsPerPage);
+  let currentPage = 0;
+
+  const generateEmbed = (page) => {
+    const start = page * itemsPerPage;
+    const end = start + itemsPerPage;
+    const pageShows = shows.slice(start, end);
+
+    const showsList = pageShows.map((s, index) => {
+      const status = s.isFinalized ? '✅' : '⏳';
+      const rating = s.averageRating > 0 ? `${s.averageRating.toFixed(2)}⭐` : 'N/A';
+      const votes = s.ratings?.length || 0;
+      const date = s.createdAt.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' });
+      
+      return `**${start + index + 1}.** ${status} Show #${s.showNumber} | ${rating} (${votes} votes) | ${date}`;
+    }).join('\n');
+
+    const finalized = shows.filter(s => s.isFinalized && s.averageRating > 0);
+    const avgRating = finalized.length > 0 
+      ? (finalized.reduce((sum, s) => sum + s.averageRating, 0) / finalized.length).toFixed(2)
+      : 'N/A';
+
+    const embed = new EmbedBuilder()
+      .setTitle(`📺 Shows - ${federation.name}`)
+      .setDescription(showsList || 'Aucun show')
+      .addFields(
+        { name: 'Total Shows', value: `${shows.length}`, inline: true },
+        { name: 'Moyenne Globale', value: `${avgRating}⭐`, inline: true },
+        { name: 'Légende', value: '✅ Finalisé | ⏳ En cours', inline: true }
+      )
+      .setColor(federation.color)
+      .setFooter({ text: `Page ${page + 1}/${totalPages} • !delshow <numéro> pour supprimer` });
+
+    return embed;
+  };
+
+  const row = new ActionRowBuilder()
+    .addComponents(
+      new ButtonBuilder()
+        .setCustomId('previous')
+        .setLabel('◀️ Précédent')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(currentPage === 0),
+      new ButtonBuilder()
+        .setCustomId('next')
+        .setLabel('Suivant ▶️')
+        .setStyle(ButtonStyle.Primary)
+        .setDisabled(totalPages <= 1)
+    );
+
+  const embedMessage = await message.reply({
+    embeds: [generateEmbed(currentPage)],
+    components: totalPages > 1 ? [row] : []
+  });
+
+  if (totalPages <= 1) return;
+
+  const collector = embedMessage.createMessageComponentCollector({
+    time: 120000
+  });
+
+  collector.on('collect', async interaction => {
+    if (interaction.user.id !== message.author.id) {
+      return interaction.reply({ content: 'Ce n\'est pas ton historique !', ephemeral: true });
+    }
+
+    if (interaction.customId === 'previous') {
+      currentPage = Math.max(0, currentPage - 1);
+    } else if (interaction.customId === 'next') {
+      currentPage = Math.min(totalPages - 1, currentPage + 1);
+    }
+
+    const updatedRow = new ActionRowBuilder()
+      .addComponents(
+        new ButtonBuilder()
+          .setCustomId('previous')
+          .setLabel('◀️ Précédent')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(currentPage === 0),
+        new ButtonBuilder()
+          .setCustomId('next')
+          .setLabel('Suivant ▶️')
+          .setStyle(ButtonStyle.Primary)
+          .setDisabled(currentPage === totalPages - 1)
+      );
+
+    await interaction.update({
+      embeds: [generateEmbed(currentPage)],
+      components: [updatedRow]
+    });
+  });
+
+  collector.on('end', () => {
+    embedMessage.edit({ components: [] }).catch(() => {});
+  });
+}
+
+// ==========================================================================
+// COMMANDE: SUPPRIMER UN SHOW DE TA FÉDÉRATION
+// ==========================================================================
+
+if (command === 'delshow') {
+  const showNumber = parseInt(args[0]);
+
+  if (!showNumber) {
+    return message.reply(
+      'Usage: `!delshow <numéro>`\n\n' +
+      'Exemples:\n' +
+      '• `!delshow 8` - Supprime ton Show #8\n' +
+      '• `!delshow 9` - Supprime ton Show #9\n\n' +
+      '⚠️ Cette action est irréversible !\n' +
+      '💡 Utilisez `!myshows` pour voir tes shows'
+    );
+  }
+
+  const show = await Show.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id,
+    showNumber: showNumber
+  });
+
+  if (!show) {
+    return message.reply(
+      `❌ Tu n'as pas de Show #${showNumber}.\n\n` +
+      '💡 Utilisez `!myshows` pour voir tous tes shows'
+    );
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  // Supprimer le show
+  await Show.deleteOne({ _id: show._id });
+
+  const embed = new EmbedBuilder()
+    .setTitle('🗑️ Show Supprimé')
+    .setDescription(`**${federation?.name || 'Ta fédération'}**`)
+    .addFields(
+      { name: 'Show Supprimé', value: `Show #${showNumber}`, inline: true },
+      { name: 'Note', value: show.averageRating > 0 ? `${show.averageRating.toFixed(2)}⭐` : 'N/A', inline: true },
+      { name: 'Votes', value: `${show.ratings?.length || 0}`, inline: true },
+      { name: 'Date', value: show.createdAt.toLocaleDateString('fr-FR'), inline: true }
+    )
+    .setColor('#E74C3C')
+    .setFooter({ text: 'Cette action est irréversible' });
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ==========================================================================
+// COMMANDE: VOIR LE DERNIER SHOW DE TA FÉDÉRATION
+// ==========================================================================
+
+if (command === 'lastshow' || command === 'ls') {
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération. Utilise `!createfed`');
+  }
+
+  const lastShow = await Show.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ showNumber: -1 });
+
+  if (!lastShow) {
+    return message.reply(
+      `📺 **${federation.name}** n'a pas encore de shows enregistrés.\n` +
+      `💡 Le prochain sera le **Show #1**`
+    );
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('📺 Dernier Show Enregistré')
+    .setDescription(`**${federation.name}**`)
+    .addFields(
+      { name: 'Numéro', value: `Show #${lastShow.showNumber}`, inline: true },
+      { name: 'Date', value: lastShow.createdAt.toLocaleDateString('fr-FR'), inline: true },
+      { name: 'Note Moyenne', value: lastShow.averageRating > 0 ? `${lastShow.averageRating.toFixed(2)}⭐` : 'Pas encore noté', inline: true },
+      { name: 'Statut', value: lastShow.isFinalized ? '✅ Finalisé' : '⏳ En attente de votes', inline: true },
+      { name: 'Prochain Show', value: `Show #${lastShow.showNumber + 1}`, inline: true }
+    )
+    .setColor(federation.color)
+    .setFooter({ text: 'Utilisez !fixshow pour corriger le numéro si nécessaire' });
+
+  return message.reply({ embeds: [embed] });
+}
+
+// ==========================================================================
+// COMMANDE: CORRIGER LE NUMÉRO DU DERNIER SHOW
+// ==========================================================================
+
+if (command === 'fixshow' || command === 'setshow') {
+  const newNumber = parseInt(args[0]);
+
+  if (!newNumber || newNumber < 1) {
+    return message.reply(
+      'Usage: `!fixshow <numéro>`\n\n' +
+      'Exemples:\n' +
+      '• `!fixshow 7` - Le dernier show devient Show #7\n' +
+      '• `!fixshow 15` - Le dernier show devient Show #15\n\n' +
+      '💡 Cela permettra au prochain !showend de créer le bon numéro\n' +
+      '💡 Utilisez `!lastshow` pour voir ton dernier numéro actuel'
+    );
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération.');
+  }
+
+  const lastShow = await Show.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  }).sort({ showNumber: -1 });
+
+  if (!lastShow) {
+    return message.reply(
+      '❌ Tu n\'as aucun show enregistré.\n' +
+      '💡 Utilise directement `!showend` pour créer ton premier show.'
+    );
+  }
+
+  const oldNumber = lastShow.showNumber;
+  
+  // Mettre à jour le numéro
+  lastShow.showNumber = newNumber;
+  await lastShow.save();
+
+  const embed = new EmbedBuilder()
+    .setTitle('✅ Numéro de Show Corrigé')
+    .setDescription(`**${federation.name}**`)
+    .addFields(
+      { name: 'Ancien Numéro', value: `Show #${oldNumber}`, inline: true },
+      { name: 'Nouveau Numéro', value: `Show #${newNumber}`, inline: true },
+      { name: 'Prochain Show', value: `Show #${newNumber + 1}`, inline: true }
+    )
+    .setColor('#2ECC71')
+    .setFooter({ text: 'Le prochain !showend créera automatiquement le bon numéro' });
+
+  return message.reply({ embeds: [embed] });
+}
   
 // ==========================================================================
   // COMMANDE: AIDE
