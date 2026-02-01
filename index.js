@@ -106,6 +106,10 @@ matchHistory: [{
     action: String, // 'picked', 'released', 'traded_to', 'traded_from', 'shared'
     date: { type: Date, default: Date.now }
   }],
+
+    // ⭐ NOUVEAU : Photo de profil
+  profileImageUrl: { type: String, default: null },
+  
   createdAt: { type: Date, default: Date.now }
 });
 
@@ -3584,7 +3588,12 @@ if (command === 'wrestler' || command === 'w') {
     })
     .setTimestamp();
 
-  // Ajouter le logo de la fédération si disponible
+ // ⭐ AJOUTER LA PHOTO DE PROFIL
+  if (wrestler.profileImageUrl) {
+    embed.setImage(wrestler.profileImageUrl); // Grande image verticale à droite
+  }
+
+  // Si tu veux aussi le logo de la fédération en thumbnail
   if (federation && federation.logoUrl && fs.existsSync(federation.logoUrl)) {
     const logoAttachment = new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' });
     embed.setThumbnail('attachment://logo.png');
@@ -4473,6 +4482,448 @@ if (command === 'fixshow' || command === 'setshow') {
     .setFooter({ text: 'Le prochain !showend créera automatiquement le bon numéro' });
 
   return message.reply({ embeds: [embed] });
+}
+
+  // ============================================================================
+// 2. COMMANDE !SETPHOTO - Définir la photo d'un lutteur
+// ============================================================================
+
+if (command === 'setphoto' || command === 'setpfp') {
+  const wrestlerName = args.join(' ');
+  
+  if (!wrestlerName) {
+    return message.reply(
+      '**Usage:** `!setphoto Nom du Lutteur` (puis attache une image)\n\n' +
+      '**Alternative:**\n' +
+      '`!setphoto Nom du Lutteur https://url-de-image.com/photo.jpg`\n\n' +
+      '**Exemples:**\n' +
+      '• `!setphoto John Cena` + attache une image\n' +
+      '• `!setphoto John Cena https://i.imgur.com/example.jpg`\n\n' +
+      '💡 Les images sont stockées de manière permanente\n' +
+      '💡 Seul le propriétaire du roster peut définir les photos'
+    );
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération. Utilise `!createfed` d\'abord.');
+  }
+
+  // Vérifier que le lutteur est dans le roster
+  const inRoster = federation.roster.find(w => 
+    w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+  );
+
+  if (!inRoster) {
+    return message.reply(
+      `❌ **${wrestlerName}** n'est pas dans ton roster.\n\n` +
+      '💡 Utilise `!roster` pour voir tes lutteurs'
+    );
+  }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ Lutteur introuvable dans la base de données.`);
+  }
+
+  // ==========================================
+  // MÉTHODE 1 : Image attachée au message
+  // ==========================================
+  if (message.attachments.first()) {
+    const attachment = message.attachments.first();
+    const ext = path.extname(attachment.name).toLowerCase();
+    
+    if (!['.png', '.jpg', '.jpeg', '.gif', '.webp'].includes(ext)) {
+      return message.reply(
+        '❌ Format d\'image non supporté.\n\n' +
+        '**Formats acceptés:** PNG, JPG, JPEG, GIF, WEBP'
+      );
+    }
+
+    const loadingMsg = await message.reply('⏳ Enregistrement de la photo...');
+
+    // ⚠️ IMPORTANT : Les URLs Discord expirent après ~7 jours
+    // Pour une solution permanente, voir SOLUTION 2 avec Imgur dans le guide
+    
+    wrestler.profileImageUrl = attachment.url;
+    await wrestler.save();
+
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Photo de Profil Définie !')
+      .setDescription(`**${wrestler.name}**`)
+      .setImage(attachment.url)
+      .setColor(federation.color)
+      .setFooter({ text: 'La photo sera affichée sur !wrestler' })
+      .setTimestamp();
+
+    return loadingMsg.edit({ content: null, embeds: [embed] });
+  }
+
+  // ==========================================
+  // MÉTHODE 2 : URL fournie en argument
+  // ==========================================
+  const urlMatch = message.content.match(/(https?:\/\/[^\s]+)/);
+  if (urlMatch) {
+    const imageUrl = urlMatch[1];
+    
+    // Vérifier que c'est bien une image
+    if (!imageUrl.match(/\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i) && 
+        !imageUrl.includes('imgur.com') && 
+        !imageUrl.includes('i.redd.it')) {
+      return message.reply(
+        '❌ L\'URL doit pointer vers une image.\n\n' +
+        '**Formats acceptés:** .jpg, .jpeg, .png, .gif, .webp\n' +
+        '**Services compatibles:** Imgur, Reddit, direct links'
+      );
+    }
+
+    const loadingMsg = await message.reply('⏳ Validation de l\'URL...');
+
+    // Tester si l'URL est accessible
+    try {
+      const response = await fetch(imageUrl, { method: 'HEAD' });
+      if (!response.ok) {
+        return loadingMsg.edit('❌ L\'URL n\'est pas accessible. Vérifie qu\'elle est publique.');
+      }
+    } catch (error) {
+      return loadingMsg.edit('❌ Impossible de vérifier l\'URL. Assure-toi qu\'elle est valide.');
+    }
+
+    wrestler.profileImageUrl = imageUrl;
+    await wrestler.save();
+
+    const embed = new EmbedBuilder()
+      .setTitle('✅ Photo de Profil Définie !')
+      .setDescription(`**${wrestler.name}**`)
+      .setImage(imageUrl)
+      .setColor(federation.color)
+      .setFooter({ text: 'La photo sera affichée sur !wrestler' })
+      .setTimestamp();
+
+    return loadingMsg.edit({ content: null, embeds: [embed] });
+  }
+
+  return message.reply(
+    '❌ Tu dois soit **attacher une image**, soit **fournir une URL**.\n\n' +
+    '**Exemples:**\n' +
+    '• Attache une image à ton message\n' +
+    '• `!setphoto John Cena https://i.imgur.com/example.jpg`'
+  );
+}
+
+// ============================================================================
+// 3. COMMANDE !REMOVEPHOTO - Supprimer la photo d'un lutteur
+// ============================================================================
+
+if (command === 'removephoto' || command === 'delpfp') {
+  const wrestlerName = args.join(' ');
+  
+  if (!wrestlerName) {
+    return message.reply('Usage: `!removephoto Nom du Lutteur`');
+  }
+
+  const federation = await Federation.findOne({
+    userId: message.author.id,
+    guildId: message.guild.id
+  });
+
+  if (!federation) {
+    return message.reply('❌ Tu n\'as pas de fédération.');
+  }
+
+  const inRoster = federation.roster.find(w => 
+    w.wrestlerName.toLowerCase() === wrestlerName.toLowerCase()
+  );
+
+  if (!inRoster) {
+    return message.reply(`❌ ${wrestlerName} n'est pas dans ton roster.`);
+  }
+
+  const wrestler = await Wrestler.findOne({
+    name: new RegExp(`^${wrestlerName}$`, 'i'),
+    guildId: message.guild.id
+  });
+
+  if (!wrestler) {
+    return message.reply(`❌ Lutteur introuvable.`);
+  }
+
+  if (!wrestler.profileImageUrl) {
+    return message.reply(`ℹ️ **${wrestler.name}** n'a pas de photo de profil définie.`);
+  }
+
+  wrestler.profileImageUrl = null;
+  await wrestler.save();
+
+  const embed = new EmbedBuilder()
+    .setTitle('🗑️ Photo Supprimée')
+    .setDescription(`La photo de **${wrestler.name}** a été supprimée.`)
+    .setColor('#E74C3C')
+    .setFooter({ text: 'Tu peux en ajouter une nouvelle avec !setphoto' });
+
+  return message.reply({ embeds: [embed] });
+}
+
+  // ============================================================================
+// 5. COMMANDE !IMPORTPHOTOS - Import en masse (ADMIN)
+// ============================================================================
+
+if (command === 'importphotos') {
+  if (!message.member.permissions.has('Administrator')) {
+    return message.reply('❌ Cette commande est réservée aux administrateurs.');
+  }
+
+  const attachment = message.attachments.first();
+  if (!attachment || !attachment.name.endsWith('.txt')) {
+    return message.reply(
+      '❌ Tu dois attacher un fichier `.txt` avec ce format :\n\n' +
+      '```\n' +
+      'John Cena|https://i.imgur.com/cena.jpg\n' +
+      'Randy Orton|https://i.imgur.com/orton.jpg\n' +
+      'Roman Reigns|https://i.imgur.com/reigns.jpg\n' +
+      '```\n\n' +
+      '**Format:** `Nom du Lutteur|URL de l\'image`\n' +
+      '**Séparateur:** Barre verticale `|`\n' +
+      '**Une ligne par lutteur**'
+    );
+  }
+
+  const loadingMsg = await message.reply('⏳ Import en cours...');
+
+  try {
+    const response = await fetch(attachment.url);
+    const content = await response.text();
+    const lines = content.split('\n').filter(l => l.trim());
+
+    let imported = 0;
+    let skipped = 0;
+    let errors = [];
+
+    for (const line of lines) {
+      const parts = line.split('|');
+      
+      if (parts.length !== 2) {
+        errors.push(`Format invalide: ${line.substring(0, 50)}...`);
+        continue;
+      }
+
+      const [name, url] = parts.map(s => s.trim());
+      
+      if (!name || !url) {
+        errors.push(`Données manquantes: ${line.substring(0, 50)}...`);
+        continue;
+      }
+
+      // Vérifier que l'URL est une image
+      if (!url.match(/\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i) && 
+          !url.includes('imgur.com') && 
+          !url.includes('i.redd.it')) {
+        errors.push(`URL invalide pour ${name}: ${url.substring(0, 50)}...`);
+        continue;
+      }
+
+      const wrestler = await Wrestler.findOne({
+        name: new RegExp(`^${name}$`, 'i'),
+        guildId: message.guild.id
+      });
+
+      if (!wrestler) {
+        errors.push(`Lutteur introuvable: ${name}`);
+        skipped++;
+        continue;
+      }
+
+      wrestler.profileImageUrl = url;
+      await wrestler.save();
+      imported++;
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('📸 Import de Photos Terminé')
+      .addFields(
+        { name: '✅ Photos Importées', value: `${imported}`, inline: true },
+        { name: '⏭️ Ignorées', value: `${skipped}`, inline: true },
+        { name: '❌ Erreurs', value: `${errors.length}`, inline: true },
+        { name: '📋 Total Lignes', value: `${lines.length}`, inline: true }
+      )
+      .setColor(errors.length === 0 ? '#2ECC71' : '#F39C12')
+      .setFooter({ text: 'Vérifie avec !wrestler pour voir les résultats' })
+      .setTimestamp();
+
+    if (errors.length > 0 && errors.length <= 10) {
+      embed.addFields({ 
+        name: '⚠️ Détails des Erreurs', 
+        value: errors.join('\n').substring(0, 1024) 
+      });
+    } else if (errors.length > 10) {
+      embed.addFields({ 
+        name: '⚠️ Détails des Erreurs', 
+        value: `${errors.slice(0, 5).join('\n')}\n\n... et ${errors.length - 5} autres erreurs` 
+      });
+    }
+
+    await loadingMsg.edit({ content: null, embeds: [embed] });
+
+  } catch (error) {
+    console.error('Erreur import photos:', error);
+    await loadingMsg.edit('❌ Erreur lors de l\'import. Vérifie le format du fichier.');
+  }
+}
+
+// ============================================================================
+// 6. COMMANDE !EXPORTPHOTOS - Backup de toutes les URLs (ADMIN)
+// ============================================================================
+
+if (command === 'exportphotos') {
+  if (!message.member.permissions.has('Administrator')) {
+    return message.reply('❌ Cette commande est réservée aux administrateurs.');
+  }
+
+  const loadingMsg = await message.reply('⏳ Export en cours...');
+
+  try {
+    const wrestlers = await Wrestler.find({ 
+      guildId: message.guild.id,
+      profileImageUrl: { $ne: null }
+    });
+
+    if (wrestlers.length === 0) {
+      return loadingMsg.edit('ℹ️ Aucune photo n\'a été définie pour le moment.');
+    }
+
+    // Créer le contenu du fichier
+    const lines = wrestlers.map(w => `${w.name}|${w.profileImageUrl}`);
+    const content = lines.join('\n');
+
+    const attachment = new AttachmentBuilder(
+      Buffer.from(content),
+      { name: 'photos_backup.txt' }
+    );
+
+    const embed = new EmbedBuilder()
+      .setTitle('📸 Export de Photos Réussi')
+      .setDescription('Backup de toutes les URLs de photos')
+      .addFields(
+        { name: '📊 Total Photos', value: `${wrestlers.length}`, inline: true },
+        { name: '💾 Format', value: 'TXT (Nom|URL)', inline: true }
+      )
+      .setColor('#3498DB')
+      .setFooter({ text: 'Garde ce fichier précieusement pour réimporter si besoin' })
+      .setTimestamp();
+
+    await loadingMsg.edit({ 
+      content: null, 
+      embeds: [embed], 
+      files: [attachment] 
+    });
+
+  } catch (error) {
+    console.error('Erreur export photos:', error);
+    await loadingMsg.edit('❌ Erreur lors de l\'export.');
+  }
+}
+
+// ============================================================================
+// 7. COMMANDE !LISTPHOTOS - Liste des lutteurs avec photos
+// ============================================================================
+
+if (command === 'listphotos' || command === 'photos') {
+  const loadingMsg = await message.reply('🔍 Recherche en cours...');
+
+  const wrestlers = await Wrestler.find({ 
+    guildId: message.guild.id,
+    profileImageUrl: { $ne: null }
+  }).sort({ name: 1 });
+
+  const total = await Wrestler.countDocuments({ guildId: message.guild.id });
+  const withPhotos = wrestlers.length;
+  const percentage = total > 0 ? ((withPhotos / total) * 100).toFixed(1) : 0;
+
+  if (wrestlers.length === 0) {
+    return loadingMsg.edit(
+      'ℹ️ Aucun lutteur n\'a de photo pour le moment.\n\n' +
+      '💡 Utilise `!setphoto Nom du Lutteur` pour en ajouter'
+    );
+  }
+
+  // Paginer si trop de lutteurs (max 25 par page)
+  const pageSize = 25;
+  const totalPages = Math.ceil(wrestlers.length / pageSize);
+  const page = 1; // Tu peux ajouter un système de pagination avec les boutons
+
+  const start = (page - 1) * pageSize;
+  const end = start + pageSize;
+  const pageWrestlers = wrestlers.slice(start, end);
+
+  const wrestlersList = pageWrestlers
+    .map(w => `• **${w.name}**`)
+    .join('\n');
+
+  const embed = new EmbedBuilder()
+    .setTitle('📸 Lutteurs avec Photos')
+    .setDescription(wrestlersList)
+    .addFields(
+      { name: '✅ Avec Photos', value: `${withPhotos}`, inline: true },
+      { name: '📊 Total Lutteurs', value: `${total}`, inline: true },
+      { name: '📈 Progression', value: `${percentage}%`, inline: true }
+    )
+    .setColor('#3498DB')
+    .setFooter({ text: `Page ${page}/${totalPages} • Utilisez !wrestler pour voir les photos` })
+    .setTimestamp();
+
+  await loadingMsg.edit({ content: null, embeds: [embed] });
+}
+
+// ============================================================================
+// 8. COMMANDE !PHOTOSTATS - Statistiques des photos
+// ============================================================================
+
+if (command === 'photostats') {
+  const loadingMsg = await message.reply('📊 Calcul des statistiques...');
+
+  const totalWrestlers = await Wrestler.countDocuments({ guildId: message.guild.id });
+  const withPhotos = await Wrestler.countDocuments({ 
+    guildId: message.guild.id,
+    profileImageUrl: { $ne: null }
+  });
+  const withoutPhotos = totalWrestlers - withPhotos;
+  const percentage = totalWrestlers > 0 ? ((withPhotos / totalWrestlers) * 100).toFixed(1) : 0;
+
+  // Lutteurs les plus récents avec photos
+  const recent = await Wrestler.find({ 
+    guildId: message.guild.id,
+    profileImageUrl: { $ne: null }
+  }).sort({ createdAt: -1 }).limit(5);
+
+  const recentList = recent.length > 0
+    ? recent.map(w => `• **${w.name}**`).join('\n')
+    : 'Aucun';
+
+  // Progression visuelle
+  const progressBar = getProgressBar(percentage, 20);
+
+  const embed = new EmbedBuilder()
+    .setTitle('📊 Statistiques des Photos')
+    .setDescription(`${progressBar} \`${percentage}%\``)
+    .addFields(
+      { name: '✅ Lutteurs avec Photos', value: `${withPhotos}`, inline: true },
+      { name: '❌ Sans Photos', value: `${withoutPhotos}`, inline: true },
+      { name: '📈 Complétude', value: `${percentage}%`, inline: true },
+      { name: '🆕 Photos Récentes', value: recentList }
+    )
+    .setColor('#3498DB')
+    .setFooter({ text: 'Utilisez !setphoto pour compléter les photos manquantes' })
+    .setTimestamp();
+
+  await loadingMsg.edit({ content: null, embeds: [embed] });
 }
   
 // ==========================================================================
