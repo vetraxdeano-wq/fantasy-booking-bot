@@ -3588,19 +3588,12 @@ if (command === 'wrestler' || command === 'w') {
     })
     .setTimestamp();
 
- // ⭐ AJOUTER LA PHOTO DE PROFIL
+ // ⭐ AJOUTER LA PHOTO DE PROFIL (petite image en haut à droite)
   if (wrestler.profileImageUrl) {
-    embed.setImage(wrestler.profileImageUrl); // Grande image verticale à droite
+    embed.setThumbnail(wrestler.profileImageUrl);
   }
 
-  // Si tu veux aussi le logo de la fédération en thumbnail
-  if (federation && federation.logoUrl && fs.existsSync(federation.logoUrl)) {
-    const logoAttachment = new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' });
-    embed.setThumbnail('attachment://logo.png');
-    await loadingMsg.edit({ content: null, embeds: [embed], files: [logoAttachment] });
-  } else {
-    await loadingMsg.edit({ content: null, embeds: [embed] });
-  }
+  await loadingMsg.edit({ content: null, embeds: [embed] });
 }
 
   if (command === 'tvratings' || command === 'ratings') {
@@ -4486,7 +4479,15 @@ if (command === 'fixshow' || command === 'setshow') {
 // ============================================================================
 
 if (command === 'setphoto' || command === 'setpfp') {
-  const wrestlerName = args.join(' ');
+  // Extraire l'URL si elle est présente
+  const urlMatch = message.content.match(/(https?:\/\/[^\s]+)/);
+  const imageUrlFromArgs = urlMatch ? urlMatch[1] : null;
+  
+  // Retirer l'URL du nom du lutteur si elle est présente
+  let wrestlerName = args.join(' ');
+  if (imageUrlFromArgs) {
+    wrestlerName = wrestlerName.replace(imageUrlFromArgs, '').trim();
+  }
   
   if (!wrestlerName) {
     return message.reply(
@@ -4567,9 +4568,8 @@ if (command === 'setphoto' || command === 'setpfp') {
   // ==========================================
   // MÉTHODE 2 : URL fournie en argument
   // ==========================================
-  const urlMatch = message.content.match(/(https?:\/\/[^\s]+)/);
-  if (urlMatch) {
-    const imageUrl = urlMatch[1];
+  if (imageUrlFromArgs) {
+    const imageUrl = imageUrlFromArgs;
     
     // Vérifier que c'est bien une image
     if (!imageUrl.match(/\.(jpg|jpeg|png|gif|webp)(\?.*)?$/i) && 
