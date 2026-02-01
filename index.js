@@ -3602,9 +3602,6 @@ if (command === 'wrestler' || command === 'w') {
     await loadingMsg.edit({ content: null, embeds: [embed] });
   }
 }
-    
-  return message.reply({ embeds: [embed] });
-}
 
   if (command === 'tvratings' || command === 'ratings') {
   const loadingMsg = await message.reply('📊 Calcul des TV Ratings en cours...');
@@ -4969,7 +4966,7 @@ if (command === 'help2') {
 
   return message.reply({ embeds: [embed] });
 }
-  } catch (error) {
+} catch (error) {
     // Capturer toutes les erreurs pour éviter le crash du bot
     console.error('========================================');
     console.error('❌ ERREUR DANS UNE COMMANDE');
