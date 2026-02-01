@@ -3365,13 +3365,16 @@ if (command === 'wrestler' || command === 'w') {
     return message.reply('Usage: `!wrestler Nom du Lutteur`\nExemple: !wrestler John Cena');
   }
 
+  // Afficher un loading message
+  const loadingMsg = await message.reply('🔍 Chargement du profil...');
+
   const wrestler = await Wrestler.findOne({
     name: new RegExp(`^${wrestlerName}$`, 'i'),
     guildId: message.guild.id
   });
 
   if (!wrestler) {
-    return message.reply(`❌ ${wrestlerName} n'existe pas dans cette ligue.`);
+    return loadingMsg.edit(`❌ ${wrestlerName} n'existe pas dans cette ligue.`);
   }
 
   // Fédération actuelle
@@ -3418,97 +3421,179 @@ if (command === 'wrestler' || command === 'w') {
     b.currentChampion && b.currentChampion.toLowerCase() === wrestler.name.toLowerCase()
   );
 
-// Derniers matchs
+  // ==========================================
+  // 🎨 NOUVELLES FONCTIONNALITÉS VISUELLES
+  // ==========================================
+
+  // 1. BARRE DE PROGRESSION POUR WIN RATE
+  const totalMatches = wrestler.wins + wrestler.losses;
+  const winRate = totalMatches > 0 ? ((wrestler.wins / totalMatches) * 100) : 0;
+  
+  function getProgressBar(percentage, length = 10) {
+    const filled = Math.round((percentage / 100) * length);
+    const empty = length - filled;
+    return '▓'.repeat(filled) + '░'.repeat(empty);
+  }
+
+  const winRateBar = getProgressBar(winRate);
+  const winRateColor = winRate >= 70 ? '🟢' : winRate >= 50 ? '🟡' : '🔴';
+
+  // 2. STREAK ACTUELLE (WIN/LOSS)
+  let currentStreak = { type: null, count: 0 };
+  if (wrestler.matchHistory && wrestler.matchHistory.length > 0) {
+    const sorted = [...wrestler.matchHistory].sort((a, b) => new Date(b.date) - new Date(a.date));
+    const lastResult = sorted[0].result;
+    currentStreak.type = lastResult;
+    currentStreak.count = 1;
+    
+    for (let i = 1; i < sorted.length; i++) {
+      if (sorted[i].result === lastResult) {
+        currentStreak.count++;
+      } else {
+        break;
+      }
+    }
+  }
+
+  const streakEmoji = currentStreak.type === 'win' ? '🔥' : currentStreak.type === 'loss' ? '❄️' : '➖';
+  const streakText = currentStreak.count > 0 
+    ? `${streakEmoji} **${currentStreak.count}** ${currentStreak.type === 'win' ? 'victoires' : 'défaites'} d'affilée`
+    : '➖ Aucun match';
+
+  // 3. BADGES DE PERFORMANCE
+  const badges = [];
+  if (titleReigns.length > 0) badges.push('👑 Champion');
+  if (winRate >= 80) badges.push('⚡ Invincible');
+  if (winRate >= 50 && winRate < 80) badges.push('💪 Solide');
+  if (totalMatches >= 20) badges.push('🎖️ Vétéran');
+  if (currentStreak.type === 'win' && currentStreak.count >= 5) badges.push('🔥 En feu');
+  if (wrestler.isShared) badges.push('🔀 Partagé');
+  if (!wrestler.isDrafted) badges.push('🆓 Free Agent');
+  
+  const badgesText = badges.length > 0 ? badges.join(' ') : '📝 Rookie';
+
+  // 4. DERNIERS MATCHS AVEC CONTEXTE AMÉLIORÉ
   const recentMatches = wrestler.matchHistory && wrestler.matchHistory.length > 0
     ? wrestler.matchHistory
         .sort((a, b) => new Date(b.date) - new Date(a.date))
         .slice(0, 3)
-        .map(match => {
+        .map((match, index) => {
           const icon = match.result === 'win' ? '✅' : '❌';
-          return `${icon} vs **${match.opponent}**\n📺 ${match.federationName} - Show #${match.showNumber}`;
+          const eventIcon = match.eventType === 'ple' ? '🎭' : '📺';
+          const eventName = match.eventType === 'ple' ? match.pleName : `Show #${match.showNumber}`;
+          const date = new Date(match.date).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' });
+          return `${icon} vs **${match.opponent}**\n${eventIcon} ${match.federationName} - ${eventName} (${date})`;
         }).join('\n\n')
-    : 'Aucun match';
+    : '📝 Aucun match enregistré';
 
-  // ⭐ HISTORIQUE DES FÉDÉRATIONS
+  // 5. HISTORIQUE DES FÉDÉRATIONS CONDENSÉ
   let federationHistoryText = '';
   if (wrestler.federationHistory && wrestler.federationHistory.length > 0) {
     const history = [...wrestler.federationHistory]
       .sort((a, b) => new Date(b.date) - new Date(a.date))
-      .slice(0, 5); // Max 5 derniers événements
+      .slice(0, 3); // Top 3 seulement
 
     const actionEmojis = {
-      'picked': '✅ Drafté',
-      'released': '❌ Libéré',
-      'traded_to': '🔄 Tradé vers',
-      'traded_from': '🔄 Tradé depuis',
-      'shared': '🔀 Partagé'
+      'picked': '📥',
+      'released': '📤',
+      'traded_to': '🔄',
+      'traded_from': '🔄',
+      'shared': '🔀'
     };
 
     federationHistoryText = history.map(h => {
-      const date = new Date(h.date).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short', year: 'numeric' });
-      const action = actionEmojis[h.action] || h.action;
-      return `${action} **${h.federationName}** (${date})`;
+      const date = new Date(h.date).toLocaleDateString('fr-FR', { day: '2-digit', month: 'short' });
+      const action = actionEmojis[h.action] || '•';
+      return `${action} **${h.federationName}** · ${date}`;
     }).join('\n');
   } else {
-    federationHistoryText = 'Aucun historique';
+    federationHistoryText = '📝 Nouveau lutteur';
   }
 
-  // Statut actuel
-  const statusText = wrestler.isDrafted 
-    ? `🏢 **${federation.name}**\n👤 Propriétaire: <@${wrestler.ownerId}>`
-    : '🆓 Agent Libre';
-
-  const showsText = shows.length > 0
-    ? `${shows.length} show(s)\n⭐ Moyenne: ${getStarDisplay(avgShowRating)} ${avgShowRating.toFixed(2)}/5`
-    : 'Aucun show';
-
-  // Stats de combat
+  // 6. STATS DE COMBAT VISUELLES
   const record = `${wrestler.wins}-${wrestler.losses}`;
-  const totalMatches = wrestler.wins + wrestler.losses;
-  const winRate = totalMatches > 0 
-    ? ((wrestler.wins / totalMatches) * 100).toFixed(1)
-    : 0;
-  
   const combatStats = totalMatches > 0
-    ? `**Record:** ${record}\n**Taux de victoire:** ${winRate}%\n**Total matchs:** ${totalMatches}`
-    : 'Aucun match enregistré';
+    ? `**${record}** | ${winRateColor} **${winRate.toFixed(1)}%**\n${winRateBar} \`${winRate.toFixed(1)}%\`\n**Matchs totaux:** ${totalMatches}`
+    : '📝 Aucun match enregistré';
 
+  // 7. TITRES AVEC DÉFENSES
   const titlesText = titleReigns.length > 0
-    ? titleReigns.map(reign => {
-        const wonDate = new Date(reign.wonAt).toLocaleDateString('fr-FR', { month: 'short', year: 'numeric' });
-        const current = !reign.lostAt ? ' 👑' : '';
-        const defenses = reign.defenses > 0 ? ` (${reign.defenses} défense${reign.defenses > 1 ? 's' : ''})` : '';
-        return `🏆 **${reign.beltName}**${current}\n${reign.federationName} - ${wonDate}${defenses}`;
+    ? titleReigns.slice(0, 3).map(reign => { // Top 3 titres
+        const current = !reign.lostAt ? '👑' : '🏆';
+        const defenses = reign.defenses > 0 ? ` · ${reign.defenses} 🛡️` : '';
+        return `${current} **${reign.beltName}**${defenses}\n📍 ${reign.federationName}`;
       }).join('\n\n')
-    : 'Aucun titre remporté';
+    : '📝 Aucun titre remporté';
 
+  // 8. STATUT AVEC PLUS DE DÉTAILS
+  const statusText = wrestler.isDrafted 
+    ? `🏢 **${federation.name}**\n👤 <@${wrestler.ownerId}>`
+    : '🆓 **Agent Libre**\n💼 Disponible au draft';
+
+  // 9. STATS DE SHOWS
+  const showsText = shows.length > 0
+    ? `**${shows.length}** show(s)\n⭐ ${getStarDisplay(avgShowRating)} **${avgShowRating.toFixed(2)}/5**`
+    : '📝 Aucune apparition';
+
+  // 10. DATE DE SIGNATURE
   const signedDate = wrestler.isDrafted && federation
     ? federation.roster.find(w => w.wrestlerName.toLowerCase() === wrestler.name.toLowerCase())
     : null;
   
   const signedText = signedDate 
     ? new Date(signedDate.signedDate).toLocaleDateString('fr-FR', { day: '2-digit', month: 'long', year: 'numeric' })
-    : 'N/A';
+    : 'Jamais drafté';
 
-  const embedColor = wrestler.isDrafted && federation ? federation.color : '#95A5A6';
+  // COULEUR DYNAMIQUE SELON PERFORMANCE
+  let embedColor;
+  if (wrestler.isDrafted && federation) {
+    embedColor = federation.color;
+  } else if (winRate >= 70) {
+    embedColor = '#2ECC71'; // Vert pour les winners
+  } else if (winRate >= 50) {
+    embedColor = '#F39C12'; // Orange pour moyens
+  } else if (totalMatches > 0) {
+    embedColor = '#E74C3C'; // Rouge pour les losers
+  } else {
+    embedColor = '#95A5A6'; // Gris pour rookies
+  }
 
+  // ==========================================
+  // 🎨 EMBED ULTRA-STYLISÉ
+  // ==========================================
+  
   const embed = new EmbedBuilder()
     .setTitle(`🤼 ${wrestler.name}`)
-    .setDescription(wrestler.isShared ? '🔀 Lutteur Partagé' : statusText)
+    .setDescription(badgesText)
     .addFields(
-      { name: '📊 Statut', value: statusText },
-      { name: '📜 Historique des Fédérations', value: federationHistoryText },
-      { name: '⚔️ Record de Combat', value: combatStats },
+      { name: '📊 Statut', value: statusText, inline: true },
+      { name: '⚔️ Record', value: combatStats, inline: true },
+      { name: '🔥 Série', value: streakText, inline: true },
+      { name: '📺 Shows', value: showsText, inline: true },
+      { name: '🏆 Titres', value: `**${titleReigns.length}** remporté(s)`, inline: true },
+      { name: '📅 Drafté le', value: signedText, inline: true },
+      { name: '📜 Historique Fédérations', value: federationHistoryText },
       { name: '📋 Derniers Matchs', value: recentMatches },
-      { name: '📺 Statistiques Shows', value: showsText, inline: true },
-      { name: '🏆 Palmarès', value: `${titleReigns.length} titre(s)`, inline: true },
-      { name: '📅 Drafté le', value: wrestler.isDrafted ? signedText : 'Jamais drafté', inline: true },
       { name: '👑 Championnats', value: titlesText }
     )
     .setColor(embedColor)
-    .setFooter({ text: currentTitle ? `Champion actuel: ${currentTitle.beltName}` : 'Aucun titre actuellement' })
+    .setFooter({ 
+      text: currentTitle 
+        ? `👑 Champion actuel: ${currentTitle.beltName}` 
+        : `📊 Win Rate: ${winRate.toFixed(1)}% · Total Matchs: ${totalMatches}` 
+    })
     .setTimestamp();
 
+  // Ajouter le logo de la fédération si disponible
+  if (federation && federation.logoUrl && fs.existsSync(federation.logoUrl)) {
+    const logoAttachment = new AttachmentBuilder(federation.logoUrl, { name: 'logo.png' });
+    embed.setThumbnail('attachment://logo.png');
+    await loadingMsg.edit({ content: null, embeds: [embed], files: [logoAttachment] });
+  } else {
+    await loadingMsg.edit({ content: null, embeds: [embed] });
+  }
+}
+    
   return message.reply({ embeds: [embed] });
 }
 
