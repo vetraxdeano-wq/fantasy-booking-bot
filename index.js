@@ -1040,10 +1040,20 @@ async function handleReset(interaction) {
 // DISCORD — ÉVÉNEMENTS
 // ================================================================
 
-client.once('ready', () => {
+client.once('ready', async () => {
   console.log(`✅ Bot connecté : ${client.user.tag}`);
   console.log(`📡 Présent sur ${client.guilds.cache.size} serveur(s)`);
   client.user.setActivity('LoL Manager 🎮', { type: 0 });
+
+  if (process.env.GUILD_ID) {
+    try {
+      await registerCommands(client.user.id);
+    } catch (err) {
+      console.error('⚠️ Échec enregistrement des commandes :', err.message);
+    }
+  } else {
+    console.log('⚠️ GUILD_ID absent — slash commands non enregistrées. Ajoute GUILD_ID dans Render pour les activer.');
+  }
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -1075,26 +1085,25 @@ client.on('interactionCreate', async (interaction) => {
 // DÉMARRAGE
 // ================================================================
 
-async function registerCommands() {
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+async function registerCommands(clientId) {
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCODRTOKEN);
   await rest.put(
-    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
+    Routes.applicationGuildCommands(clientId, process.env.GUILD_ID),
     { body: commands.map(c => c.toJSON()) }
   );
   console.log('✅ Slash commands enregistrées sur le serveur');
 }
 
 async function main() {
-  if (!process.env.DISCORD_TOKEN || !process.env.MONGODB_URI || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
+  if (!process.env.DISCODRTOKEN || !process.env.MONGO_DB_URL) {
     console.error('❌ Variables d\'environnement manquantes. Vérifie ton fichier .env');
     process.exit(1);
   }
 
-  await mongoose.connect(process.env.MONGODB_URI);
+  await mongoose.connect(process.env.MONGO_DB_URL);
   console.log('✅ MongoDB connecté');
 
-  await registerCommands();
-  await client.login(process.env.DISCORD_TOKEN);
+  await client.login(process.env.DISCODRTOKEN);
 }
 
 main().catch(err => {
