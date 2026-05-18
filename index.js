@@ -943,7 +943,7 @@ async function handleImportData(interaction) {
     );
   }
 
-  const report = { teams: 0, skipped: 0, errors: [] };
+  const report = { teams: 0, players: 0, champions: 0, skipped: 0, errors: [] };
 
   // ── Import teams.json ──────────────────────────────────────────
   // Structure attendue : tableau d'objets ou { teams: [...] }
@@ -976,16 +976,122 @@ async function handleImportData(interaction) {
     }
   }
 
+  // ── Import champions.json ──────────────────────────────────────
+  // Structure : { data: { roles: { NomChamp: [roles] }, counterpicks: [...], synergies: [...], display_aliases: {...} } }
+  const championsFile = path.join(dataDir, 'champions.json');
+  if (fs.existsSync(championsFile)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(championsFile, 'utf8'));
+      // Accès au dict roles : { "Aatrox": ["Top","Jungle"], ... }
+      const rolesMap = raw.roles || raw.data?.roles || {};
+      const counterpicks = raw.counterpicks || raw.data?.counterpicks || [];
+      const synergies    = raw.synergies    || raw.data?.synergies    || [];
+      const aliases      = raw.display_aliases || raw.data?.display_aliases || {};
+
+      // Stockage en mémoire globale — pas de collection Mongo dédiée
+      global.CHAMPIONS_DATA = {
+        roles:       rolesMap,
+        counterpicks,
+        synergies,
+        aliases,
+        list:        Object.keys(rolesMap),
+      };
+      report.champions = global.CHAMPIONS_DATA.list.length;
+    } catch (e) {
+      report.errors.push(`champions.json : ${e.message}`);
+    }
+  }
+
+  // ── Import players.json ────────────────────────────────────────
+  // Structure : { data: { rostered_seeds: [...], free_agent_seeds: [...] } }
+  // Les NPC rostered sont rattachés à leur équipe via teamId (slug).
+  // Les free agents sont stockés en mémoire globale.
+  const playersFile = path.join(dataDir, 'players.json');
+  if (fs.existsSync(playersFile)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(playersFile, 'utf8'));
+      const rostered   = raw.rostered_seeds   || raw.data?.rostered_seeds   || (Array.isArray(raw) ? raw : []);
+      const freeAgents = raw.free_agent_seeds  || raw.data?.free_agent_seeds || [];
+
+      // Rattacher les NPC rostered à leur équipe (npcRoster)
+      for (const p of rostered) {
+        const teamSlug = p.teamId || p.team;
+        if (!teamSlug || teamSlug === 'fa') continue;
+        const team = await Team.findOne({
+          $or: [
+            { 'shortName': { $regex: new RegExp(`^${teamSlug}$`, 'i') } },
+            { 'name':      { $regex: new RegExp(teamSlug, 'i') }        },
+          ],
+        });
+        if (!team) continue;
+
+        // Éviter les doublons (même ign déjà dans npcRoster)
+        const alreadyIn = (team.npcRoster || []).some(n => n.ign === p.ign);
+        if (alreadyIn) { report.skipped++; continue; }
+
+        const npc = {
+          ign:         p.ign,
+          name:        p.ign,
+          role:        p.role,
+          nationality: p.nationality || p.residency,
+          rating:      p.rating      ?? 50,
+          potential:   p.potential   ?? p.rating ?? 50,
+          salary:      p.salary      ?? 0,
+          marketValue: p.marketValue ?? 0,
+          reputation:  p.reputation  ?? 50,
+          personality: p.personality ?? 'standard',
+          // pool : tableau [[champName, score], ...] → on garde les 5 meilleurs noms
+          mainChampion: Array.isArray(p.champions) ? (p.champions[0]?.[0] ?? p.champions[0] ?? null) : null,
+          championPool: Array.isArray(p.champions)
+            ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
+            : [],
+          contractEnd: p.contractEnd ?? null,
+          photo:       p.photo       ?? null,
+        };
+
+        await Team.updateOne({ _id: team._id }, { $push: { npcRoster: npc } });
+        report.players++;
+      }
+
+      // Free agents stockés en mémoire globale
+      global.FREE_AGENT_NPCS = freeAgents.map(p => ({
+        ign:         p.ign,
+        name:        p.ign,
+        role:        p.role,
+        nationality: p.nationality || p.residency,
+        rating:      p.rating      ?? 50,
+        potential:   p.potential   ?? p.rating ?? 50,
+        salary:      p.salary      ?? 0,
+        marketValue: p.marketValue ?? 0,
+        reputation:  p.reputation  ?? 50,
+        personality: p.personality ?? 'standard',
+        mainChampion: Array.isArray(p.champions) ? (p.champions[0]?.[0] ?? p.champions[0] ?? null) : null,
+        championPool: Array.isArray(p.champions)
+          ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
+          : [],
+        contractEnd: p.contractEnd ?? null,
+        photo:       p.photo       ?? null,
+      }));
+
+    } catch (e) {
+      report.errors.push(`players.json : ${e.message}`);
+    }
+  }
+
   // ── Résumé ─────────────────────────────────────────────────────
   const lines = [
     `✅ **Import terminé**`,
     `• Équipes importées : **${report.teams}**`,
-    `• Équipes ignorées (déjà existantes) : **${report.skipped}**`,
+    `• Champions chargés en mémoire : **${report.champions}**`,
+    `• Joueurs NPC rattachés : **${report.players}**`,
+    `• Éléments ignorés (doublons) : **${report.skipped}**`,
   ];
   if (report.errors.length) {
     lines.push(`\n⚠️ Erreurs :\n${report.errors.map(e => `\`${e}\``).join('\n')}`);
   }
-  lines.push('\n💡 Adapte `handleImportData` si ta structure JSON est différente.');
+  if (global.FREE_AGENT_NPCS?.length) {
+    lines.push(`• Free agents chargés en mémoire : **${global.FREE_AGENT_NPCS.length}**`);
+  }
 
   return interaction.editReply(lines.join('\n'));
 }
