@@ -1086,7 +1086,7 @@ client.on('interactionCreate', async (interaction) => {
 // ================================================================
 
 async function registerCommands(clientId) {
-  const rest = new REST({ version: '10' }).setToken(process.env.DISCODRTOKEN);
+  const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   await rest.put(
     Routes.applicationGuildCommands(clientId, process.env.GUILD_ID),
     { body: commands.map(c => c.toJSON()) }
@@ -1095,15 +1095,15 @@ async function registerCommands(clientId) {
 }
 
 async function main() {
-  if (!process.env.DISCODRTOKEN || !process.env.MONGO_DB_URL) {
+  if (!process.env.DISCORD_TOKEN || !process.env.MONGODB_URI) {
     console.error('❌ Variables d\'environnement manquantes. Vérifie ton fichier .env');
     process.exit(1);
   }
 
-  await mongoose.connect(process.env.MONGO_DB_URL);
+  await mongoose.connect(process.env.MONGODB_URI);
   console.log('✅ MongoDB connecté');
 
-  await client.login(process.env.DISCODRTOKEN);
+  await client.login(process.env.DISCORD_TOKEN);
 }
 
 main().catch(err => {
