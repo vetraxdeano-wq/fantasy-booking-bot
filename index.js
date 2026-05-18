@@ -11,6 +11,18 @@ const fs = require('fs');
 const path = require('path');
 
 // ================================================================
+// CLIENT DISCORD
+// ================================================================
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.GuildMembers,
+  ],
+});
+
+// ================================================================
 // MONGODB — SCHEMAS & MODELS
 // ================================================================
 
@@ -976,44 +988,21 @@ async function handleImportData(interaction) {
     }
   }
 
-  // ── Import champions.json ──────────────────────────────────────
-  // Structure : { data: { roles: { NomChamp: [roles] }, counterpicks: [...], synergies: [...], display_aliases: {...} } }
-  const championsFile = path.join(dataDir, 'champions.json');
-  if (fs.existsSync(championsFile)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(championsFile, 'utf8'));
-      // Accès au dict roles : { "Aatrox": ["Top","Jungle"], ... }
-      const rolesMap = raw.roles || raw.data?.roles || {};
-      const counterpicks = raw.counterpicks || raw.data?.counterpicks || [];
-      const synergies    = raw.synergies    || raw.data?.synergies    || [];
-      const aliases      = raw.display_aliases || raw.data?.display_aliases || {};
+  // ── Import champions.json + free agents (via loadStaticData) ──
+  // Les données statiques sont chargées en mémoire globale.
+  // loadStaticData() est aussi appelée au démarrage, donc ces données
+  // survivent aux redémarrages sans nécessiter /import-data.
+  await loadStaticData();
+  report.champions = global.CHAMPIONS_DATA?.list.length ?? 0;
 
-      // Stockage en mémoire globale — pas de collection Mongo dédiée
-      global.CHAMPIONS_DATA = {
-        roles:       rolesMap,
-        counterpicks,
-        synergies,
-        aliases,
-        list:        Object.keys(rolesMap),
-      };
-      report.champions = global.CHAMPIONS_DATA.list.length;
-    } catch (e) {
-      report.errors.push(`champions.json : ${e.message}`);
-    }
-  }
-
-  // ── Import players.json ────────────────────────────────────────
-  // Structure : { data: { rostered_seeds: [...], free_agent_seeds: [...] } }
-  // Les NPC rostered sont rattachés à leur équipe via teamId (slug).
-  // Les free agents sont stockés en mémoire globale.
+  // ── Import players.json — NPC rostered uniquement ──────────────
+  // Les free agents sont gérés par loadStaticData() ci-dessus.
   const playersFile = path.join(dataDir, 'players.json');
   if (fs.existsSync(playersFile)) {
     try {
       const raw = JSON.parse(fs.readFileSync(playersFile, 'utf8'));
-      const rostered   = raw.rostered_seeds   || raw.data?.rostered_seeds   || (Array.isArray(raw) ? raw : []);
-      const freeAgents = raw.free_agent_seeds  || raw.data?.free_agent_seeds || [];
+      const rostered = raw.rostered_seeds || raw.data?.rostered_seeds || (Array.isArray(raw) ? raw : []);
 
-      // Rattacher les NPC rostered à leur équipe (npcRoster)
       for (const p of rostered) {
         const teamSlug = p.teamId || p.team;
         if (!teamSlug || teamSlug === 'fa') continue;
@@ -1025,7 +1014,6 @@ async function handleImportData(interaction) {
         });
         if (!team) continue;
 
-        // Éviter les doublons (même ign déjà dans npcRoster)
         const alreadyIn = (team.npcRoster || []).some(n => n.ign === p.ign);
         if (alreadyIn) { report.skipped++; continue; }
 
@@ -1040,7 +1028,6 @@ async function handleImportData(interaction) {
           marketValue: p.marketValue ?? 0,
           reputation:  p.reputation  ?? 50,
           personality: p.personality ?? 'standard',
-          // pool : tableau [[champName, score], ...] → on garde les 5 meilleurs noms
           mainChampion: Array.isArray(p.champions) ? (p.champions[0]?.[0] ?? p.champions[0] ?? null) : null,
           championPool: Array.isArray(p.champions)
             ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
@@ -1052,27 +1039,6 @@ async function handleImportData(interaction) {
         await Team.updateOne({ _id: team._id }, { $push: { npcRoster: npc } });
         report.players++;
       }
-
-      // Free agents stockés en mémoire globale
-      global.FREE_AGENT_NPCS = freeAgents.map(p => ({
-        ign:         p.ign,
-        name:        p.ign,
-        role:        p.role,
-        nationality: p.nationality || p.residency,
-        rating:      p.rating      ?? 50,
-        potential:   p.potential   ?? p.rating ?? 50,
-        salary:      p.salary      ?? 0,
-        marketValue: p.marketValue ?? 0,
-        reputation:  p.reputation  ?? 50,
-        personality: p.personality ?? 'standard',
-        mainChampion: Array.isArray(p.champions) ? (p.champions[0]?.[0] ?? p.champions[0] ?? null) : null,
-        championPool: Array.isArray(p.champions)
-          ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
-          : [],
-        contractEnd: p.contractEnd ?? null,
-        photo:       p.photo       ?? null,
-      }));
-
     } catch (e) {
       report.errors.push(`players.json : ${e.message}`);
     }
@@ -1177,6 +1143,76 @@ async function registerCommands() {
   console.log('✅ Slash commands enregistrées sur le serveur');
 }
 
+// ================================================================
+// CHARGEMENT DES DONNÉES STATIQUES (champions + free agents)
+// Appelé au démarrage ET après /import-data pour survivre aux redémarrages
+// ================================================================
+
+async function loadStaticData() {
+  const dataDir = path.join(__dirname, 'data');
+
+  // ── Champions ──────────────────────────────────────────────────
+  const champFile = path.join(dataDir, 'champions.json');
+  if (fs.existsSync(champFile)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(champFile, 'utf8'));
+      const rolesMap     = raw.roles          || raw.data?.roles          || {};
+      const counterpicks = raw.counterpicks    || raw.data?.counterpicks   || [];
+      const synergies    = raw.synergies       || raw.data?.synergies      || [];
+      const aliases      = raw.display_aliases || raw.data?.display_aliases || {};
+
+      global.CHAMPIONS_DATA = {
+        roles: rolesMap,
+        counterpicks,
+        synergies,
+        aliases,
+        list: Object.keys(rolesMap),
+      };
+      console.log(`✅ Champions chargés en mémoire : ${global.CHAMPIONS_DATA.list.length}`);
+    } catch (e) {
+      console.error(`⚠️ Erreur champions.json : ${e.message}`);
+    }
+  } else {
+    console.warn('⚠️ data/champions.json introuvable — CHAMPIONS_DATA non chargé');
+  }
+
+  // ── Free Agents ────────────────────────────────────────────────
+  const playersFile = path.join(dataDir, 'players.json');
+  if (fs.existsSync(playersFile)) {
+    try {
+      const raw = JSON.parse(fs.readFileSync(playersFile, 'utf8'));
+      const freeAgents = raw.free_agent_seeds || raw.data?.free_agent_seeds || [];
+
+      global.FREE_AGENT_NPCS = freeAgents.map(p => ({
+        ign:          p.ign,
+        name:         p.ign,
+        role:         p.role,
+        nationality:  p.nationality || p.residency,
+        rating:       p.rating      ?? 50,
+        potential:    p.potential   ?? p.rating ?? 50,
+        salary:       p.salary      ?? 0,
+        marketValue:  p.marketValue ?? 0,
+        reputation:   p.reputation  ?? 50,
+        personality:  p.personality ?? 'standard',
+        mainChampion: Array.isArray(p.champions)
+          ? (p.champions[0]?.[0] ?? p.champions[0] ?? null)
+          : null,
+        championPool: Array.isArray(p.champions)
+          ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
+          : [],
+        contractEnd:  p.contractEnd ?? null,
+        photo:        p.photo       ?? null,
+      }));
+      console.log(`✅ Free agents chargés en mémoire : ${global.FREE_AGENT_NPCS.length}`);
+    } catch (e) {
+      console.error(`⚠️ Erreur players.json : ${e.message}`);
+    }
+  } else {
+    global.FREE_AGENT_NPCS = [];
+    console.warn('⚠️ data/players.json introuvable — FREE_AGENT_NPCS vide');
+  }
+}
+
 async function main() {
   if (!process.env.DISCORD_TOKEN || !process.env.MONGODB_URI || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
     console.error('❌ Variables d\'environnement manquantes. Vérifie ton fichier .env');
@@ -1185,6 +1221,9 @@ async function main() {
 
   await mongoose.connect(process.env.MONGODB_URI);
   console.log('✅ MongoDB connecté');
+
+  // Chargement des données statiques depuis les JSON (survit aux redémarrages)
+  await loadStaticData();
 
   await registerCommands();
   await client.login(process.env.DISCORD_TOKEN);
