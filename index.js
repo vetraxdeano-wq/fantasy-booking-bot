@@ -11,19 +11,6 @@ const fs = require('fs');
 const path = require('path');
 
 // ================================================================
-// DISCORD — CLIENT
-// ================================================================
-
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.MessageContent,
-    GatewayIntentBits.GuildMembers,
-  ],
-});
-
-// ================================================================
 // MONGODB — SCHEMAS & MODELS
 // ================================================================
 
@@ -965,7 +952,7 @@ async function handleImportData(interaction) {
   if (fs.existsSync(teamsFile)) {
     try {
       const raw  = JSON.parse(fs.readFileSync(teamsFile, 'utf8'));
-      const list = Array.isArray(raw) ? raw : (raw.teams || Object.values(raw));
+      const list = Array.isArray(raw) ? raw : (raw.teams || raw.data?.teams || Object.values(raw));
 
       for (const t of list) {
         const name = t.name || t.teamName;
@@ -976,8 +963,8 @@ async function handleImportData(interaction) {
             name,
             shortName: t.shortName || t.abbr || name.substring(0, 3).toUpperCase(),
             region:    t.region || t.league || 'LEC',
-            prestige:  t.prestige ?? t.strength ?? t.rating ?? Math.floor(Math.random() * 30 + 50),
-            budget:    t.budget ?? 1_000_000,
+            prestige:  t.prestige ?? t.strength ?? t.rating ?? (t.tier != null ? (5 - t.tier) * 15 + 50 : Math.floor(Math.random() * 30 + 50)),
+            budget:    t.budget ?? t.transferBudget ?? t.salaryBudget ?? 1_000_000,
           });
           report.teams++;
         } else {
@@ -1040,20 +1027,10 @@ async function handleReset(interaction) {
 // DISCORD — ÉVÉNEMENTS
 // ================================================================
 
-client.once('ready', async () => {
+client.once('ready', () => {
   console.log(`✅ Bot connecté : ${client.user.tag}`);
   console.log(`📡 Présent sur ${client.guilds.cache.size} serveur(s)`);
   client.user.setActivity('LoL Manager 🎮', { type: 0 });
-
-  if (process.env.GUILD_ID) {
-    try {
-      await registerCommands(client.user.id);
-    } catch (err) {
-      console.error('⚠️ Échec enregistrement des commandes :', err.message);
-    }
-  } else {
-    console.log('⚠️ GUILD_ID absent — slash commands non enregistrées. Ajoute GUILD_ID dans Render pour les activer.');
-  }
 });
 
 client.on('interactionCreate', async (interaction) => {
@@ -1085,17 +1062,17 @@ client.on('interactionCreate', async (interaction) => {
 // DÉMARRAGE
 // ================================================================
 
-async function registerCommands(clientId) {
+async function registerCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
   await rest.put(
-    Routes.applicationGuildCommands(clientId, process.env.GUILD_ID),
+    Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
     { body: commands.map(c => c.toJSON()) }
   );
   console.log('✅ Slash commands enregistrées sur le serveur');
 }
 
 async function main() {
-  if (!process.env.DISCORD_TOKEN || !process.env.MONGODB_URI) {
+  if (!process.env.DISCORD_TOKEN || !process.env.MONGODB_URI || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
     console.error('❌ Variables d\'environnement manquantes. Vérifie ton fichier .env');
     process.exit(1);
   }
@@ -1103,6 +1080,7 @@ async function main() {
   await mongoose.connect(process.env.MONGODB_URI);
   console.log('✅ MongoDB connecté');
 
+  await registerCommands();
   await client.login(process.env.DISCORD_TOKEN);
 }
 
