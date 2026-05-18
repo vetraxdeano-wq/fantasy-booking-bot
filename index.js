@@ -11,6 +11,19 @@ const fs = require('fs');
 const path = require('path');
 
 // ================================================================
+// DISCORD — CLIENT
+// ================================================================
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+    GatewayIntentBits.GuildMembers,
+  ],
+});
+
+// ================================================================
 // MONGODB — SCHEMAS & MODELS
 // ================================================================
 
