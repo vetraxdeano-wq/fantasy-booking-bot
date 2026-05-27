@@ -1,1235 +1,778 @@
+// ═══════════════════════════════════════════════════════════════════════════════
+//  🎾  TENNIS MANAGER 2026 — Bot Discord
+//      discord.js v14 — mono-fichier — Supabase Storage + Render
+// ═══════════════════════════════════════════════════════════════════════════════
+//
+//  VARIABLES D'ENVIRONNEMENT REQUISES (.env / Render Dashboard) :
+//    DISCORD_TOKEN        → token du bot Discord
+//    CLIENT_ID            → application ID Discord
+//    GUILD_ID             → ID de ton serveur Discord
+//    SUPABASE_URL         → ex: https://xxxx.supabase.co
+//    SUPABASE_KEY         → clé service_role (pas anon) de Supabase
+//    SUPABASE_BUCKET      → nom du bucket Supabase Storage (ex: "saves")
+//    SUPABASE_FILE        → nom du fichier dans le bucket (ex: "save.db")
+//    ADMIN_PASSWORD       → mot de passe pour la page web d'upload (optionnel)
+//
+//  SETUP :
+//    1. npm install
+//    2. Configurer les env vars
+//    3. node index.js --deploy   (une seule fois pour enregistrer les slash commands)
+//    4. node index.js
+//
+//  WORKFLOW FIN DE SAISON :
+//    → Push save.db sur ton repo GitHub privé
+//    → GitHub Actions l'upload sur Supabase Storage
+//    → Le bot recharge automatiquement au prochain démarrage Render
+//    → Ou utilise /admin reload_db pour forcer le rechargement sans redémarrer
+// ═══════════════════════════════════════════════════════════════════════════════
+
 require('dotenv').config();
+const fs      = require('fs');
+const path    = require('path');
+const https   = require('https');
+const http    = require('http');
 const {
   Client, GatewayIntentBits, REST, Routes,
-  SlashCommandBuilder, EmbedBuilder,
-  ActionRowBuilder, ButtonBuilder, ButtonStyle,
-  StringSelectMenuBuilder, ComponentType,
-  PermissionFlagsBits,
+  SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
 } = require('discord.js');
-const mongoose = require('mongoose');
-const fs = require('fs');
-const path = require('path');
+const Database = require('better-sqlite3');
 
-// ================================================================
-// CLIENT DISCORD
-// ================================================================
+// ─── Chemins ──────────────────────────────────────────────────────────────────
+const TMP_DIR        = path.join('/tmp', 'tennis-bot');
+const BOT_DB_PATH    = path.join(TMP_DIR, 'bot.db');    // ⚠️ éphémère sur Render → voir note ci-dessous
+const SEASON_DB_PATH = path.join(TMP_DIR, 'season.db');
+if (!fs.existsSync(TMP_DIR)) fs.mkdirSync(TMP_DIR, { recursive: true });
 
-const client = new Client({
-  intents: [
-    GatewayIntentBits.Guilds,
-    GatewayIntentBits.GuildMessages,
-    GatewayIntentBits.GuildMembers,
+// NOTE Render : /tmp est éphémère mais survit aux redémarrages chauds.
+// Pour bot.db (économie), utilise Render Disk ($1/mo) ou Supabase DB si tu
+// veux une persistance totale. Pour l'instant bot.db est en /tmp — les coins
+// survivront aux redémarrages normaux mais pas aux re-deploys.
+// → Remplace BOT_DB_PATH par un chemin sur Render Disk si tu en as un.
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  SUPABASE STORAGE — téléchargement du save.db
+// ══════════════════════════════════════════════════════════════════════════════
+
+function supabaseDownload() {
+  return new Promise((resolve, reject) => {
+    const { SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET, SUPABASE_FILE } = process.env;
+    if (!SUPABASE_URL || !SUPABASE_KEY || !SUPABASE_BUCKET || !SUPABASE_FILE) {
+      return reject(new Error('Variables Supabase manquantes (SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET, SUPABASE_FILE)'));
+    }
+
+    const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${SUPABASE_FILE}`;
+    const lib = url.startsWith('https') ? https : http;
+
+    const file = fs.createWriteStream(SEASON_DB_PATH);
+    const req  = lib.get(url, {
+      headers: {
+        'Authorization': `Bearer ${SUPABASE_KEY}`,
+        'apikey': SUPABASE_KEY,
+      }
+    }, (res) => {
+      if (res.statusCode === 301 || res.statusCode === 302) {
+        file.close();
+        return supabaseDownload().then(resolve).catch(reject);
+      }
+      if (res.statusCode !== 200) {
+        file.close();
+        fs.unlink(SEASON_DB_PATH, () => {});
+        return reject(new Error(`Supabase HTTP ${res.statusCode}`));
+      }
+      res.pipe(file);
+      file.on('finish', () => {
+        file.close();
+        resolve();
+      });
+    });
+    req.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
+  });
+}
+
+// Télécharge le save.db au démarrage (non-bloquant)
+let seasonDbReady = false;
+supabaseDownload()
+  .then(() => {
+    seasonDbReady = true;
+    console.log(`✅ save.db téléchargé depuis Supabase (${(fs.statSync(SEASON_DB_PATH).size / 1024 / 1024).toFixed(1)} Mo)`);
+  })
+  .catch((e) => {
+    console.warn(`⚠️  Impossible de télécharger save.db : ${e.message}`);
+    // Si un ancien fichier existe en /tmp (redémarrage chaud), on l'utilise
+    if (fs.existsSync(SEASON_DB_PATH)) {
+      seasonDbReady = true;
+      console.log('ℹ️  Utilisation du save.db en cache /tmp');
+    }
+  });
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  BASE DE DONNÉES LOCALE (économie)
+// ══════════════════════════════════════════════════════════════════════════════
+const botDb = new Database(BOT_DB_PATH);
+botDb.exec(`
+  CREATE TABLE IF NOT EXISTS players (
+    discord_id   TEXT PRIMARY KEY,
+    username     TEXT NOT NULL,
+    ingame_name  TEXT NOT NULL,
+    nationality  TEXT NOT NULL,
+    playstyle    TEXT NOT NULL,
+    tm_player_id INTEGER DEFAULT NULL,
+    coins        INTEGER DEFAULT 500,
+    created_at   TEXT DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS transactions (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    discord_id  TEXT    NOT NULL,
+    amount      INTEGER NOT NULL,
+    reason      TEXT    NOT NULL,
+    created_at  TEXT    DEFAULT (datetime('now'))
+  );
+`);
+
+const db = {
+  get:         (id)       => botDb.prepare('SELECT * FROM players WHERE discord_id=?').get(id),
+  exists:      (id)       => !!db.get(id),
+  nameTaken:   (name)     => !!botDb.prepare('SELECT 1 FROM players WHERE LOWER(ingame_name)=LOWER(?)').get(name),
+  create:      (p)        => botDb.prepare(
+    'INSERT INTO players (discord_id,username,ingame_name,nationality,playstyle) VALUES (?,?,?,?,?)'
+  ).run(p.discordId, p.username, p.ingameName, p.nationality, p.playstyle),
+  linkTm:      (id, tmId) => botDb.prepare('UPDATE players SET tm_player_id=? WHERE discord_id=?').run(tmId, id),
+  addCoins:    (id, n, r) => {
+    botDb.prepare('UPDATE players SET coins=coins+? WHERE discord_id=?').run(n, id);
+    botDb.prepare('INSERT INTO transactions (discord_id,amount,reason) VALUES (?,?,?)').run(id, n, r ?? 'Gain');
+  },
+  removeCoins: (id, n, r) => {
+    const p = db.get(id);
+    if (!p || p.coins < n) return false;
+    botDb.prepare('UPDATE players SET coins=coins-? WHERE discord_id=?').run(n, id);
+    botDb.prepare('INSERT INTO transactions (discord_id,amount,reason) VALUES (?,?,?)').run(id, -n, r ?? 'Dépense');
+    return true;
+  },
+  txHistory:   (id, lim=5) => botDb.prepare(
+    'SELECT * FROM transactions WHERE discord_id=? ORDER BY created_at DESC LIMIT ?'
+  ).all(id, lim),
+};
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  LECTURE DU SAVE.DB (Tennis Manager 2026)
+// ══════════════════════════════════════════════════════════════════════════════
+
+// ── Mappings TM2026 ──────────────────────────────────────────────────────────
+const HAND_LABEL    = { 1: 'Droitier', 2: 'Gaucher' };
+const BH_LABEL      = { 1: 'Revers 1 main', 2: 'Revers 2 mains' };
+const SURFACE_LABEL = { 1: '🔶 Terre battue', 2: '🟩 Gazon', 3: '🔷 Dur', 4: '🏟️ Dur indoor' };
+const ROUND_LABEL   = { '-1': '🏆 Vainqueur', '0': '🥈 Finaliste', '1': 'Demi-finale', '2': 'Quart de finale', '3': '8ème de finale', '4': '16ème de finale', '5': '32ème de finale', '6': '64ème de finale' };
+
+// Attributs TM2026 → label affiché (groupés par catégorie)
+const ATTR_GROUPS = {
+  '🎾 Service': [
+    ['ServePower',       'Puissance service'],
+    ['ServeSpin',        'Spin service'],
+    ['ServeConsistency', 'Consistance service'],
   ],
-});
-
-// ================================================================
-// MONGODB — SCHEMAS & MODELS
-// ================================================================
-
-const PlayerSchema = new mongoose.Schema({
-  discordId:       { type: String, required: true, unique: true },
-  discordUsername: String,
-  // Identité du rookie
-  name:        { type: String, required: true },
-  age:         { type: Number, default: 16 },
-  role:        { type: String, enum: ['Top', 'Jungle', 'Mid', 'ADC', 'Support'] },
-  nationality: String,
-  mainChampion:  String,
-  championPool:  [String], // [phare, champ2, champ3]
-  // Contrat
-  teamId:    { type: mongoose.Schema.Types.ObjectId, ref: 'Team', default: null },
-  teamName:  { type: String, default: null },
-  region:    { type: String, default: null },
-  salary:    { type: Number, default: 10000 },
-  // Progression
-  reputation:  { type: Number, default: 50 },
-  experience:  { type: Number, default: 0 },
-  level:       { type: Number, default: 1 },
-  // Stats globales (cumulées sur la saison)
-  stats: {
-    kills:   { type: Number, default: 0 },
-    deaths:  { type: Number, default: 0 },
-    assists: { type: Number, default: 0 },
-    wins:    { type: Number, default: 0 },
-    losses:  { type: Number, default: 0 },
-    mvps:    { type: Number, default: 0 },
-    gamesPlayed: { type: Number, default: 0 },
-  },
-  // Flags
-  isReady:    { type: Boolean, default: false }, // a choisi son équipe
-  createdAt:  { type: Date, default: Date.now },
-});
-
-const TeamSchema = new mongoose.Schema({
-  name:       { type: String, required: true, unique: true },
-  shortName:  String,
-  region:     String,
-  prestige:   { type: Number, default: 50 },  // 0–100, influence les matchs
-  budget:     { type: Number, default: 1000000 },
-  // Roster : mix NPC + joueurs Discord
-  players:    [{ type: mongoose.Schema.Types.ObjectId, ref: 'Player' }],
-  npcRoster:  [mongoose.Schema.Types.Mixed], // joueurs NPC venant du JSON
-  // Stats du split en cours
-  wins:       { type: Number, default: 0 },
-  losses:     { type: Number, default: 0 },
-  points:     { type: Number, default: 0 },
-  // Flag
-  hasDiscordPlayer: { type: Boolean, default: false },
-});
-
-const SeasonSchema = new mongoose.Schema({
-  number: { type: Number, default: 1 },
-  year:   { type: Number, default: new Date().getFullYear() },
-  currentPhase: {
-    type: String,
-    enum: ['REGISTRATION', 'WINTER', 'FIRST_STAND', 'SPRING', 'MSI', 'SUMMER', 'WORLDS', 'OFFSEASON'],
-    default: 'REGISTRATION',
-  },
-  currentWeek: { type: Number, default: 0 },
-  isActive:    { type: Boolean, default: true },
-  // Archive des résultats par phase
-  phaseResults: { type: mongoose.Schema.Types.Mixed, default: {} },
-  createdAt:   { type: Date, default: Date.now },
-});
-
-const MatchSchema = new mongoose.Schema({
-  seasonId:  { type: mongoose.Schema.Types.ObjectId, ref: 'Season' },
-  phase:     String,
-  week:      Number,
-  region:    String,
-  isInternational: { type: Boolean, default: false },
-  team1:     { name: String, id: mongoose.Schema.Types.ObjectId },
-  team2:     { name: String, id: mongoose.Schema.Types.ObjectId },
-  winner:    { name: String, id: mongoose.Schema.Types.ObjectId },
-  loser:     { name: String, id: mongoose.Schema.Types.ObjectId },
-  score:     String,   // "2-0" / "2-1" / "1-2" / "0-2"
-  playerPerformances: [mongoose.Schema.Types.Mixed],
-  date:      { type: Date, default: Date.now },
-});
-
-const Player  = mongoose.model('Player',  PlayerSchema);
-const Team    = mongoose.model('Team',    TeamSchema);
-const Season  = mongoose.model('Season',  SeasonSchema);
-const Match   = mongoose.model('Match',   MatchSchema);
-
-// ================================================================
-// CONSTANTES DU JEU
-// ================================================================
-
-const ROLE_EMOJI = {
-  Top: '🗡️', Jungle: '🌿', Mid: '⚡', ADC: '🏹', Support: '🛡️',
+  '🎯 Fond de court': [
+    ['Forehand',             'Coup droit'],
+    ['ForehandConsistency',  'CD consistance'],
+    ['Backhand',             'Revers'],
+    ['BackhandConsistency',  'RV consistance'],
+    ['Return',               'Retour'],
+    ['Counter',              'Counter'],
+    ['Topspin',              'Topspin'],
+    ['Underspin',            'Slice'],
+    ['Dropshot',             'Amorti'],
+    ['Control',              'Contrôle'],
+    ['Timing',               'Timing'],
+  ],
+  '🏃 Physique': [
+    ['Speed',     'Vitesse'],
+    ['Footwork',  'Déplacement'],
+    ['Balance',   'Équilibre'],
+    ['Agility',   'Agilité'],
+    ['Fitness',   'Condition'],
+    ['Stamina',   'Endurance'],
+  ],
+  '🧠 Mental': [
+    ['Anticipation',   'Anticipation'],
+    ['Focus',          'Concentration'],
+    ['Composure',      'Sang-froid'],
+    ['KillerInstinct', 'Instinct'],
+    ['FightingSpirit', 'Combativité'],
+    ['Tactical',       'Tactique'],
+  ],
+  '🏅 Autre': [
+    ['Volley',  'Volée'],
+    ['Double',  'Double'],
+  ],
 };
 
-const REGIONS = {
-  LEC: { name: 'LEC', full: 'EMEA Championship',       emoji: '🇪🇺', slots: 10, intlSeeds: 3 },
-  LCS: { name: 'LCS', full: 'Championship Series NA',  emoji: '🇺🇸', slots: 10, intlSeeds: 2 },
-  LCK: { name: 'LCK', full: 'League Champions Korea',  emoji: '🇰🇷', slots: 10, intlSeeds: 3 },
-  LPL: { name: 'LPL', full: 'Pro League China',        emoji: '🇨🇳', slots: 18, intlSeeds: 4 },
-  LFL: { name: 'LFL', full: 'La Ligue Française',      emoji: '🇫🇷', slots: 8,  intlSeeds: 1 },
+function openSaveDb() {
+  if (!seasonDbReady || !fs.existsSync(SEASON_DB_PATH)) return null;
+  try { return new Database(SEASON_DB_PATH, { readonly: true }); }
+  catch (e) { console.error('Erreur ouverture save.db:', e.message); return null; }
+}
+
+function getTmPlayerData(tmPlayerId) {
+  const s = openSaveDb();
+  if (!s) return null;
+  try {
+    const p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(tmPlayerId);
+    if (!p) return null;
+
+    const rank = s.prepare(
+      'SELECT Rank, Points, NbTournamentPlayed FROM Ranking WHERE PlayerId=? AND Circuit=0 ORDER BY Date DESC LIMIT 1'
+    ).get(tmPlayerId) ?? {};
+
+    const race = s.prepare(
+      'SELECT Rank AS RaceRank, Points AS RacePoints, Year FROM RaceRanking WHERE PlayerId=? AND Circuit=0 ORDER BY Year DESC LIMIT 1'
+    ).get(tmPlayerId) ?? {};
+
+    const stats = s.prepare(`
+      SELECT
+        SUM(MatchPlayed)              AS played,
+        SUM(MatchWon)                 AS won,
+        SUM(AcesCount)                AS aces,
+        SUM(DoubleFaultsCount)        AS df,
+        SUM(FirstServePointsWon)      AS fs1w,
+        SUM(FirstServePointsPlayed)   AS fs1p,
+        SUM(SecondServePointsWon)     AS fs2w,
+        SUM(SecondServePointsPlayed)  AS fs2p,
+        SUM(BreakPointsSaved)         AS bpSaved,
+        SUM(SavingBreakPointsPlayed)  AS bpFaced,
+        SUM(BreakPointsConverted)     AS bpConv,
+        SUM(ConversionBreakPointsPlayed) AS bpOpp
+      FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=0
+    `).get(tmPlayerId) ?? {};
+
+    const surfStats = s.prepare(`
+      SELECT Surface, SUM(MatchPlayed) AS p, SUM(MatchWon) AS w
+      FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=0 AND Surface > 0
+      GROUP BY Surface ORDER BY Surface
+    `).all(tmPlayerId);
+
+    const titles = s.prepare(
+      'SELECT COUNT(*) AS cnt FROM TournamentResult WHERE PlayerId=? AND RoundReached=-1'
+    ).get(tmPlayerId)?.cnt ?? 0;
+
+    const finals = s.prepare(
+      'SELECT COUNT(*) AS cnt FROM TournamentResult WHERE PlayerId=? AND RoundReached=0'
+    ).get(tmPlayerId)?.cnt ?? 0;
+
+    const lastResults = s.prepare(`
+      SELECT t.Name, tr.Year, tr.RoundReached, tr.MoneyWon
+      FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+      WHERE tr.PlayerId=?
+      ORDER BY tr.Date DESC LIMIT 5
+    `).all(tmPlayerId);
+
+    const totalMoney = s.prepare(
+      'SELECT SUM(MoneyWon) AS total FROM TournamentResult WHERE PlayerId=?'
+    ).get(tmPlayerId)?.total ?? 0;
+
+    // Injuries actives
+    const injuries = s.prepare(
+      'SELECT Zone, Type FROM Injury WHERE PlayerId=? AND IsActive=1'
+    ).all(tmPlayerId);
+
+    return { p, rank, race, stats, surfStats, titles, finals, lastResults, totalMoney, injuries };
+  } catch (e) {
+    console.error('Erreur lecture save.db:', e.message);
+    return null;
+  } finally {
+    s.close();
+  }
+}
+
+function searchTmPlayers(query) {
+  const s = openSaveDb();
+  if (!s) return [];
+  try {
+    return s.prepare(`
+      SELECT Id, Firstname, Lastname, Country FROM TennisPlayer
+      WHERE (Firstname LIKE ? OR Lastname LIKE ? OR (Firstname||' '||Lastname) LIKE ?)
+      AND Retired=0 LIMIT 10
+    `).all(`%${query}%`, `%${query}%`, `%${query}%`);
+  } catch { return []; }
+  finally { s.close(); }
+}
+
+function getSaveDbInfo() {
+  const s = openSaveDb();
+  if (!s) return null;
+  try {
+    const world    = s.prepare('SELECT CurrentTime FROM TennisWorld LIMIT 1').get();
+    const mainP    = s.prepare('SELECT tp.Firstname, tp.Lastname FROM TeamPro tm JOIN TennisPlayer tp ON tp.Id=tm.PlayerId LIMIT 1').get();
+    const nbActive = s.prepare('SELECT COUNT(*) AS c FROM TennisPlayer WHERE Retired=0').get()?.c ?? 0;
+    const mods     = s.prepare('SELECT Name, ModVersion FROM Mods WHERE IsEnabled=1').all();
+    return {
+      date: world?.CurrentTime ? new Date(world.CurrentTime * 1000).toLocaleDateString('fr-FR') : '?',
+      mainPlayer: mainP ? `${mainP.Firstname} ${mainP.Lastname}` : '?',
+      nbActive,
+      mods,
+      size: fs.existsSync(SEASON_DB_PATH) ? (fs.statSync(SEASON_DB_PATH).size / 1024 / 1024).toFixed(1) : '?',
+    };
+  } catch { return null; }
+  finally { s.close(); }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+//  UTILITAIRES
+// ══════════════════════════════════════════════════════════════════════════════
+const COLOR = { green: 0x2ECC71, red: 0xE74C3C, blue: 0x3498DB, gold: 0xF1C40F, tennis: 0x1A6B3C, purple: 0x9B59B6 };
+
+const PLAYSTYLE_EMOJI = {
+  'Attaquant de fond': '⚡', 'Défenseur de fond': '🛡️',
+  'Serveur-Volleyeur': '🏹', 'Monteur au filet': '🔥', 'Tout-terrain': '🎯',
 };
 
-// Structure des phases : ordre, semaines, description
-const PHASES = {
-  REGISTRATION: {
-    label: '📋 Inscriptions',
-    weeks: 0,
-    next:  'WINTER',
-    description: 'Les rookies créent leurs personnages et choisissent leurs équipes.',
-  },
-  WINTER: {
-    label: '❄️ Winter Split',
-    weeks: 5,
-    next:  'FIRST_STAND',
-    description: 'Phase régulière hivernale dans chaque région. Round-robin.',
-  },
-  FIRST_STAND: {
-    label: '🏆 First Stand',
-    weeks: 2,
-    next:  'SPRING',
-    description: 'Tournoi international précoce entre les meilleures équipes d\'hiver.',
-    isInternational: true,
-    seedsPerRegion: { LEC: 2, LCS: 2, LCK: 2, LPL: 3, LFL: 1 },
-  },
-  SPRING: {
-    label: '🌸 Spring Split',
-    weeks: 5,
-    next:  'MSI',
-    description: 'Phase régulière printanière. Les points s\'accumulent.',
-  },
-  MSI: {
-    label: '🌍 Mid-Season Invitational',
-    weeks: 2,
-    next:  'SUMMER',
-    description: 'Le grand rendez-vous du milieu de saison — top équipes de chaque région.',
-    isInternational: true,
-    seedsPerRegion: { LEC: 1, LCS: 1, LCK: 1, LPL: 1, LFL: 1 },
-  },
-  SUMMER: {
-    label: '☀️ Summer Split',
-    weeks: 5,
-    next:  'WORLDS',
-    description: 'Dernier split régional. Les Worlds se profilent.',
-  },
-  WORLDS: {
-    label: '🌏 World Championship',
-    weeks: 3,
-    next:  'OFFSEASON',
-    description: 'Le grand Mondial. Group Stage, Quarts, Demies, Finale.',
-    isInternational: true,
-    seedsPerRegion: { LEC: 3, LCS: 2, LCK: 3, LPL: 4, LFL: 1 },
-  },
-  OFFSEASON: {
-    label: '💤 Intersaison',
-    weeks: 0,
-    next:  null,
-    description: 'Transferts, négociations, préparation de la prochaine saison.',
-  },
-};
-
-// XP nécessaire pour chaque niveau
-const XP_TABLE = [0, 200, 500, 1000, 2000, 3500, 5500, 8000, 11000, 15000, 20000];
-
-// ================================================================
-// MOTEUR DE JEU — SIMULATION
-// ================================================================
-
-/**
- * Force d'une équipe en tenant compte du prestige + hasard + joueur réel
- */
-function teamStrength(team) {
-  const base = team.prestige || 50;
-  const playerBonus = team.hasDiscordPlayer ? 5 : 0;
-  const noise = (Math.random() * 30) - 15;  // ±15 de variance
-  return Math.max(5, base + playerBonus + noise);
+// Barre de progression /20 pour les attributs TM2026
+function attrBar(v) {
+  const val   = Math.round(v ?? 0);
+  const stars = Math.round(val / 20 * 5);
+  const bar   = '●'.repeat(stars) + '○'.repeat(5 - stars);
+  return `${bar} **${val}**/20`;
 }
 
-/**
- * Simule un Bo3 entre deux équipes. Retourne le résultat complet.
- */
-function simulateBo3(t1, t2) {
-  const str1 = teamStrength(t1);
-  const str2 = teamStrength(t2);
-  const winProb1 = str1 / (str1 + str2);
-
-  let s1 = 0, s2 = 0;
-  const games = [];
-
-  while (s1 < 2 && s2 < 2) {
-    const gameDuration = Math.floor(Math.random() * 18 + 22); // 22–40 min
-    if (Math.random() < winProb1) {
-      s1++;
-      games.push({ winner: t1.name, duration: gameDuration });
-    } else {
-      s2++;
-      games.push({ winner: t2.name, duration: gameDuration });
-    }
-  }
-
-  const winner = s1 > s2 ? t1 : t2;
-  const loser  = s1 > s2 ? t2 : t1;
-
-  return {
-    winner, loser,
-    score: `${s1}-${s2}`,
-    winnerScore: s1 > s2 ? s1 : s2,
-    loserScore:  s1 > s2 ? s2 : s1,
-    games,
-  };
+// Barre maîtrise surface (valeur brute TM, multipliée x5 pour avoir /100)
+function surfBar(v) {
+  const pct    = Math.min(100, Math.round((v ?? 0) * 5));
+  const filled = Math.round(pct / 10);
+  return `${'█'.repeat(filled)}${'░'.repeat(10 - filled)} ${pct}%`;
 }
 
-/**
- * Génère les performances d'un joueur Discord pour un match
- */
-function generatePerformance(player, won) {
-  const roleBase = {
-    Top:     { k: 3,  d: 3, a: 4  },
-    Jungle:  { k: 4,  d: 3, a: 8  },
-    Mid:     { k: 5,  d: 3, a: 5  },
-    ADC:     { k: 5,  d: 3, a: 4  },
-    Support: { k: 1,  d: 3, a: 12 },
-  };
-  const base = roleBase[player.role] || { k: 3, d: 3, a: 5 };
-  const v    = () => Math.floor(Math.random() * 5) - 2;
-  const wb   = won ? 1 : -1;
+function pct(a, b)  { return b > 0 ? `${Math.round((a ?? 0) / b * 100)}%` : '—'; }
+function moneyFmt(n){ return n > 0 ? `$${Number(n).toLocaleString('fr-FR')}` : '$0'; }
+function age(ts)    { return Math.floor((Date.now() / 1000 - ts) / (365.25 * 86400)); }
 
-  const kills   = Math.max(0, base.k + v() + wb);
-  const deaths  = Math.max(0, base.d + v() - wb);
-  const assists = Math.max(0, base.a + v() + wb);
-  const kda     = deaths === 0
-    ? (kills + assists).toFixed(1)
-    : ((kills + assists) / deaths).toFixed(2);
-  const rating  = Math.min(10, Math.max(1,
-    parseFloat(kda) * 1.5 + (won ? 0.5 : -0.5) + (Math.random() - 0.5)
-  )).toFixed(1);
-  const isMvp   = won && parseFloat(rating) >= 8.5;
-  const champion = player.championPool?.[Math.floor(Math.random() * player.championPool.length)]
-    || player.mainChampion || '?';
+function ok(t, d)   { return new EmbedBuilder().setColor(COLOR.green).setTitle(`✅ ${t}`).setDescription(d).setTimestamp(); }
+function err(d)     { return new EmbedBuilder().setColor(COLOR.red).setTitle('❌ Erreur').setDescription(d); }
 
-  return { kills, deaths, assists, kda, rating: parseFloat(rating), champion, isMvp };
-}
+// ══════════════════════════════════════════════════════════════════════════════
+//  BUILDERS D'EMBEDS
+// ══════════════════════════════════════════════════════════════════════════════
 
-/**
- * Calcul du niveau selon l'XP
- */
-function computeLevel(xp) {
-  for (let i = XP_TABLE.length - 1; i >= 0; i--) {
-    if (xp >= XP_TABLE[i]) return i + 1;
-  }
-  return 1;
-}
-
-/**
- * Simule tous les matchs d'une semaine pour une région donnée
- */
-async function simulateRegionWeek(season, regionKey, teams) {
-  const results = [];
-  // Round-robin : chaque équipe joue une fois par semaine (appairages aléatoires)
-  const shuffled = [...teams].sort(() => Math.random() - 0.5);
-
-  for (let i = 0; i + 1 < shuffled.length; i += 2) {
-    const t1 = shuffled[i];
-    const t2 = shuffled[i + 1];
-
-    const result = simulateBo3(t1, t2);
-
-    // Mise à jour des stats équipes en BDD
-    await Team.updateOne({ _id: t1._id }, {
-      $inc: {
-        wins:   result.winner._id.equals(t1._id) ? 1 : 0,
-        losses: result.loser._id.equals(t1._id)  ? 1 : 0,
-        points: result.winner._id.equals(t1._id) ? 3 : 0,
-      },
-    });
-    await Team.updateOne({ _id: t2._id }, {
-      $inc: {
-        wins:   result.winner._id.equals(t2._id) ? 1 : 0,
-        losses: result.loser._id.equals(t2._id)  ? 1 : 0,
-        points: result.winner._id.equals(t2._id) ? 3 : 0,
-      },
-    });
-
-    // Mise à jour des joueurs Discord impliqués
-    for (const team of [t1, t2]) {
-      const discordPlayer = await Player.findOne({ teamId: team._id });
-      if (!discordPlayer) continue;
-
-      const won  = result.winner._id.equals(team._id);
-      const perf = generatePerformance(discordPlayer, won);
-      const xpGain  = won ? 150 : 60;
-      const repGain = won ? 2  : -1;
-      const newXp   = discordPlayer.experience + xpGain;
-      const newLvl  = computeLevel(newXp);
-
-      await Player.updateOne({ _id: discordPlayer._id }, {
-        $inc: {
-          'stats.kills':       perf.kills,
-          'stats.deaths':      perf.deaths,
-          'stats.assists':     perf.assists,
-          'stats.wins':        won ? 1 : 0,
-          'stats.losses':      won ? 0 : 1,
-          'stats.mvps':        perf.isMvp ? 1 : 0,
-          'stats.gamesPlayed': 1,
-          experience:          xpGain,
-          reputation:          repGain,
-        },
-        $set: { level: newLvl },
-      });
-
-      results.push({
-        region:   regionKey,
-        team1:    t1, team2: t2,
-        winner:   result.winner, loser: result.loser,
-        score:    result.score,
-        discordPlayer: { ...discordPlayer.toObject(), perf },
-      });
-    }
-
-    if (!results.find(r => r.team1._id.equals(t1._id) && r.team2._id.equals(t2._id))) {
-      results.push({
-        region:  regionKey,
-        team1:   t1, team2: t2,
-        winner:  result.winner, loser: result.loser,
-        score:   result.score,
-      });
-    }
-
-    // Sauvegarde du match en BDD
-    await Match.create({
-      seasonId: season._id,
-      phase:    season.currentPhase,
-      week:     season.currentWeek + 1,
-      region:   regionKey,
-      team1:    { name: t1.name, id: t1._id },
-      team2:    { name: t2.name, id: t2._id },
-      winner:   { name: result.winner.name, id: result.winner._id },
-      loser:    { name: result.loser.name,  id: result.loser._id  },
-      score:    result.score,
-    });
-  }
-
-  return results;
-}
-
-/**
- * Simule un tournoi international (First Stand / MSI / Worlds)
- * Retourne les résultats de la semaine du tournoi
- */
-async function simulateInternational(season, phaseKey, week) {
-  const phaseInfo = PHASES[phaseKey];
-  const seeds = phaseInfo.seedsPerRegion || {};
-  const participants = [];
-
-  // Sélection des meilleures équipes de chaque région
-  for (const [region, n] of Object.entries(seeds)) {
-    const topTeams = await Team.find({ region }).sort({ points: -1 }).limit(n);
-    participants.push(...topTeams);
-  }
-
-  if (participants.length < 4) {
-    return [{ region: 'INTERNATIONAL', error: 'Pas assez d\'équipes qualifiées.' }];
-  }
-
-  const results = [];
-  const shuffled = participants.sort(() => Math.random() - 0.5);
-
-  for (let i = 0; i + 1 < shuffled.length; i += 2) {
-    const t1 = shuffled[i];
-    const t2 = shuffled[i + 1];
-    const result = simulateBo3(t1, t2);
-
-    // Bonus de réputation pour les joueurs dans les internationaux
-    for (const team of [t1, t2]) {
-      const dp = await Player.findOne({ teamId: team._id });
-      if (!dp) continue;
-      const won = result.winner._id.equals(team._id);
-      const perf = generatePerformance(dp, won);
-      const xpGain  = won ? 300 : 120;
-      const repGain = won ? 5   : 1;
-      await Player.updateOne({ _id: dp._id }, {
-        $inc: {
-          'stats.kills': perf.kills, 'stats.deaths': perf.deaths,
-          'stats.assists': perf.assists, 'stats.wins': won ? 1 : 0,
-          'stats.losses': won ? 0 : 1, 'stats.gamesPlayed': 1,
-          experience: xpGain, reputation: repGain,
-        },
-        $set: { level: computeLevel(dp.experience + xpGain) },
-      });
-    }
-
-    await Match.create({
-      seasonId: season._id, phase: phaseKey, week,
-      region: 'INTERNATIONAL', isInternational: true,
-      team1: { name: t1.name, id: t1._id }, team2: { name: t2.name, id: t2._id },
-      winner: { name: result.winner.name, id: result.winner._id },
-      loser:  { name: result.loser.name,  id: result.loser._id  },
-      score:  result.score,
-    });
-
-    results.push({
-      region: 'INTERNATIONAL', isInternational: true,
-      team1: t1, team2: t2,
-      winner: result.winner, loser: result.loser,
-      score: result.score,
-    });
-  }
-
-  return results;
-}
-
-// ================================================================
-// BUILDERS D'EMBEDS
-// ================================================================
-
-function embedProfil(player) {
-  const { kills: k, deaths: d, assists: a, wins, losses, mvps, gamesPlayed: gp } = player.stats;
-  const kda  = d === 0 ? `${(k + a).toFixed(1)} (Perfect)` : ((k + a) / d).toFixed(2);
-  const wr   = gp === 0 ? '—' : `${Math.round((wins / gp) * 100)}%`;
-  const xpNext = XP_TABLE[player.level] || '∞';
-
-  return new EmbedBuilder()
-    .setColor(0x3498db)
-    .setTitle(`${ROLE_EMOJI[player.role] || '🎮'} ${player.name}`)
-    .setDescription(`*${player.nationality} · ${player.role} · ${player.age} ans*`)
-    .addFields(
-      {
-        name: '🏟️ Équipe',
-        value: player.teamName
-          ? `**${player.teamName}** (${player.region})\n💰 Salaire : ${player.salary.toLocaleString('fr-FR')} €/mois`
-          : '*— Agent libre —*',
-        inline: false,
-      },
-      { name: '🏆 Champion phare', value: player.mainChampion || '—', inline: true },
-      { name: '📚 Pool',           value: player.championPool?.join(' · ') || '—', inline: true },
-      { name: '✨ Niveau',          value: `**${player.level}** (${player.experience} / ${xpNext} XP)`, inline: true },
-      { name: '⭐ Réputation',      value: `${player.reputation}/100`, inline: true },
-      { name: '🎖️ MVPs',           value: `${mvps}`, inline: true },
-      { name: '📊 Stats saison',
-        value: `\`\`\`${k}/${d}/${a}  ·  KDA ${kda}  ·  WR ${wr}  (${wins}V ${losses}D)\`\`\`` },
-    )
-    .setFooter({ text: 'LoL Manager · Saison en cours' })
-    .setTimestamp();
-}
-
-function embedResults(allMatches, phase, week) {
-  const phaseLabel = PHASES[phase]?.label || phase;
+function buildProfileEmbed(player, tmData, avatarUrl) {
   const embed = new EmbedBuilder()
-    .setColor(0xe74c3c)
-    .setTitle(`📅 Résultats — ${phaseLabel} · Semaine ${week}`)
+    .setColor(COLOR.tennis)
+    .setTitle(`🎾 ${player.ingame_name}`)
+    .setDescription(`${PLAYSTYLE_EMOJI[player.playstyle] ?? '🎾'} *${player.playstyle}*  •  🌍 ${player.nationality}`)
+    .setThumbnail(avatarUrl)
+    .addFields(
+      { name: '💰 Coins',       value: `**${player.coins.toLocaleString()} 🪙**`, inline: true },
+      { name: '📅 Inscrit le',  value: player.created_at.split(' ')[0],           inline: true },
+      { name: '\u200B',         value: '\u200B',                                  inline: true },
+    )
+    .setFooter({ text: 'Tennis Manager 2026 — Simulation' })
     .setTimestamp();
 
-  // Grouper par région
-  const byRegion = {};
-  for (const m of allMatches) {
-    const key = m.region || 'INTERNATIONAL';
-    if (!byRegion[key]) byRegion[key] = [];
-    byRegion[key].push(m);
+  if (!tmData) {
+    embed.addFields({ name: '📊 Stats TM2026', value: player.tm_player_id
+      ? seasonDbReady
+        ? '⚠️ Joueur TM introuvable dans le save.db actuel.'
+        : '⏳ Save.db en cours de téléchargement...'
+      : '🔗 Utilise `/link <nom>` pour associer ton joueur TM2026.'
+    });
+    return embed;
   }
 
-  for (const [region, matches] of Object.entries(byRegion)) {
-    const regionInfo = REGIONS[region];
-    const emoji = regionInfo?.emoji || '🌐';
-    const label = regionInfo ? `${emoji} ${region}` : `🌐 International`;
-    const lines = matches
-      .filter(m => m.winner && m.loser)
-      .map(m => `${m.winner.name} **${m.score}** ${m.loser.name}`)
-      .join('\n');
+  const { p, rank, race, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tmData;
 
-    if (lines) embed.addFields({ name: label, value: lines });
+  // ── Identité TM ─────────────────────────────────────────────────────────────
+  embed.addFields(
+    { name: '─────── 👤 Joueur TM2026 ───────', value: '\u200B' },
+    { name: '🆔 Nom',         value: `${p.Firstname} ${p.Lastname}`,         inline: true },
+    { name: '🌍 Pays',        value: p.Country ?? '—',                        inline: true },
+    { name: '🎂 Âge',         value: `${age(p.DateOfBirth)} ans`,             inline: true },
+    { name: '🖐️ Main',        value: HAND_LABEL[p.Handedness] ?? '—',        inline: true },
+    { name: '🎯 Revers',      value: BH_LABEL[p.BackhandStyle] ?? '—',        inline: true },
+    { name: '⭐ Potentiel',   value: `${(p.Potential ?? 0).toFixed(1)}/20`,   inline: true },
+    { name: '💪 Condition',   value: `${p.PhysicalCondition ?? '—'}/100`,     inline: true },
+    { name: '❤️ Moral',      value: `${p.Morale ?? '—'}/100`,                inline: true },
+    { name: '🌟 Notoriété',   value: `${(p.Fame ?? 0).toFixed(1)}/20`,        inline: true },
+  );
+
+  if (injuries?.length) {
+    embed.addFields({ name: '🩹 Blessures actives', value: `${injuries.length} blessure(s) en cours`, inline: false });
   }
 
-  // Performances notables des joueurs Discord
-  const playerPerfs = allMatches.filter(m => m.discordPlayer);
-  if (playerPerfs.length > 0) {
-    const perfLines = playerPerfs.map(m => {
-      const { name, perf } = m.discordPlayer;
-      const mvpTag = perf.isMvp ? ' 🌟 **MVP**' : '';
-      return `· **${name}** (${m.discordPlayer.role}) — ${perf.kills}/${perf.deaths}/${perf.assists} sur ${perf.champion}${mvpTag}`;
-    }).join('\n');
-    embed.addFields({ name: '🎮 Performances des pros', value: perfLines });
+  // ── Classement ──────────────────────────────────────────────────────────────
+  embed.addFields(
+    { name: '─────── 📈 Classement ───────', value: '\u200B' },
+    { name: '🏅 Rang ATP',     value: rank.Rank != null ? `**#${rank.Rank}**` : '—',        inline: true },
+    { name: '🔢 Points ATP',   value: rank.Points != null ? `${rank.Points}` : '—',         inline: true },
+    { name: '🏟️ Tournois',   value: rank.NbTournamentPlayed != null ? `${rank.NbTournamentPlayed}` : '—', inline: true },
+    { name: '🏎️ Race rang',   value: race.RaceRank != null ? `**#${race.RaceRank}**` : '—', inline: true },
+    { name: '🏎️ Race pts',    value: race.RacePoints != null ? `${race.RacePoints}` : '—',  inline: true },
+    { name: '💵 Prize money', value: moneyFmt(totalMoney),                                   inline: true },
+  );
+
+  // ── Palmarès ────────────────────────────────────────────────────────────────
+  embed.addFields(
+    { name: '─────── 🏆 Palmarès ───────', value: '\u200B' },
+    { name: '🏆 Titres',  value: `**${titles}**`,                                              inline: true },
+    { name: '🥈 Finales', value: `**${finals}**`,                                              inline: true },
+    { name: '📊 Bilan',   value: stats.played ? `**${stats.won}V** / ${(stats.played - stats.won)}D (${pct(stats.won, stats.played)})` : '—', inline: true },
+  );
+
+  // ── Stats match ─────────────────────────────────────────────────────────────
+  if (stats.played) {
+    embed.addFields(
+      { name: '─────── 📊 Stats match ───────', value: '\u200B' },
+      { name: '🎾 Aces',          value: `${stats.aces ?? 0}`,               inline: true },
+      { name: '❌ Doubles f.',    value: `${stats.df ?? 0}`,                  inline: true },
+      { name: '\u200B',           value: '\u200B',                            inline: true },
+      { name: '💥 1er service',   value: pct(stats.fs1w, stats.fs1p),        inline: true },
+      { name: '🔄 2ème service',  value: pct(stats.fs2w, stats.fs2p),        inline: true },
+      { name: '\u200B',           value: '\u200B',                            inline: true },
+      { name: '🛡️ BP sauvés',    value: pct(stats.bpSaved, stats.bpFaced),  inline: true },
+      { name: '⚡ BP convertis',  value: pct(stats.bpConv, stats.bpOpp),     inline: true },
+      { name: '\u200B',           value: '\u200B',                            inline: true },
+    );
+  }
+
+  // ── Bilan par surface ────────────────────────────────────────────────────────
+  if (surfStats.length) {
+    const lines = surfStats.map(s =>
+      `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
+    ).join('\n');
+    embed.addFields({ name: '─────── 🌍 Bilan par surface ───────', value: lines });
+  }
+
+  // ── Maîtrise surface ────────────────────────────────────────────────────────
+  embed.addFields(
+    { name: '─────── 🏟️ Maîtrise surface ───────', value: '\u200B' },
+    { name: '🔶 Terre battue', value: surfBar(p.ClaySurfaceMastering),      inline: true },
+    { name: '🟩 Gazon',        value: surfBar(p.GrassSurfaceMastering),     inline: true },
+    { name: '🔷 Dur',          value: surfBar(p.HardSurfaceMastering),      inline: true },
+    { name: '🏟️ Dur indoor',  value: surfBar(p.HardIndoorSurfaceMastering), inline: true },
+  );
+
+  // ── Derniers résultats ───────────────────────────────────────────────────────
+  if (lastResults.length) {
+    const lines = lastResults.map(r =>
+      `${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+    ).join('\n');
+    embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
   }
 
   return embed;
 }
 
-function embedStandings(teams, region) {
-  const regionInfo = REGIONS[region];
-  const sorted = [...teams].sort((a, b) => b.points - a.points || b.wins - a.wins);
-  const lines  = sorted.map((t, i) => {
-    const medal = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `${i + 1}.`;
-    const disc  = t.hasDiscordPlayer ? ' 🎮' : '';
-    return `${medal} **${t.name}**${disc} — ${t.wins}V ${t.losses}D (${t.points} pts)`;
-  }).join('\n');
-
-  return new EmbedBuilder()
-    .setColor(0xf39c12)
-    .setTitle(`${regionInfo?.emoji || '🌐'} Classement ${region}`)
-    .setDescription(lines || '*Aucun match joué*')
-    .setFooter({ text: '🎮 = équipe avec un joueur Discord' })
+function buildAttributesEmbed(player, p, avatarUrl) {
+  const embed = new EmbedBuilder()
+    .setColor(COLOR.purple)
+    .setTitle(`📋 Attributs — ${p.Firstname} ${p.Lastname}`)
+    .setDescription(`Profil Discord : **${player.ingame_name}** | Potentiel : **${(p.Potential ?? 0).toFixed(1)}/20**`)
+    .setThumbnail(avatarUrl)
+    .setFooter({ text: 'Tennis Manager 2026 — Attributs' })
     .setTimestamp();
+
+  // Calcul de la moyenne globale
+  const allAttrs = Object.values(ATTR_GROUPS).flat().map(([key]) => p[key] ?? 0);
+  const avg = (allAttrs.reduce((a, b) => a + b, 0) / allAttrs.length).toFixed(1);
+  embed.addFields({ name: '⚖️ Moyenne globale', value: `**${avg}/20**` });
+
+  for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
+    const lines = attrs.map(([key, label]) => `\`${label.padEnd(20)}\` ${attrBar(p[key])}`).join('\n');
+    embed.addFields({ name: groupName, value: lines, inline: false });
+  }
+
+  return embed;
 }
 
-// ================================================================
-// SLASH COMMANDS — DÉFINITIONS
-// ================================================================
+function buildWalletEmbed(player, txs) {
+  const embed = new EmbedBuilder()
+    .setColor(COLOR.gold)
+    .setTitle(`💰 Portefeuille — ${player.ingame_name}`)
+    .addFields({ name: 'Solde actuel', value: `**${player.coins.toLocaleString()} 🪙**` });
+  if (txs.length) {
+    const lines = txs.map(t =>
+      `${t.amount > 0 ? '📈' : '📉'} \`${t.amount > 0 ? '+' : ''}${t.amount}\` — ${t.reason} *(${t.created_at.split(' ')[0]})*`
+    ).join('\n');
+    embed.addFields({ name: '📋 Dernières transactions', value: lines });
+  }
+  return embed;
+}
 
-const commands = [
-  // ── Joueur ────────────────────────────────────────────────────
+// ══════════════════════════════════════════════════════════════════════════════
+//  DÉFINITION DES SLASH COMMANDS
+// ══════════════════════════════════════════════════════════════════════════════
+const COMMANDS_DATA = [
+
   new SlashCommandBuilder()
-    .setName('create')
-    .setDescription('🌟 Crée ton rookie de 16 ans dans la scène pro')
-    .addStringOption(o => o.setName('nom').setDescription('Ton pseudo in-game').setRequired(true))
-    .addStringOption(o => o.setName('role').setDescription('Ton rôle principal').setRequired(true)
+    .setName('inscription')
+    .setDescription('Crée ton joueur dans la simulation TM2026')
+    .addStringOption(o => o.setName('nom').setDescription('Nom de ton joueur').setRequired(true))
+    .addStringOption(o => o.setName('nationalite').setDescription('Nationalité (ex: France)').setRequired(true))
+    .addStringOption(o => o.setName('style').setDescription('Style de jeu').setRequired(true)
       .addChoices(
-        { name: '🗡️ Top',     value: 'Top'     },
-        { name: '🌿 Jungle',  value: 'Jungle'  },
-        { name: '⚡ Mid',     value: 'Mid'     },
-        { name: '🏹 ADC',     value: 'ADC'     },
-        { name: '🛡️ Support', value: 'Support' },
-      ))
-    .addStringOption(o => o.setName('nationalite').setDescription('Ta nationalité (ex: Français, Coréen…)').setRequired(true))
-    .addStringOption(o => o.setName('champion_phare').setDescription('Ton champion signature').setRequired(true))
-    .addStringOption(o => o.setName('champion2').setDescription('2e champion de ton pool').setRequired(true))
-    .addStringOption(o => o.setName('champion3').setDescription('3e champion de ton pool').setRequired(true)),
-
-  new SlashCommandBuilder()
-    .setName('teams')
-    .setDescription('🏟️ Voir les offres d\'équipes et signer ton contrat'),
-
-  new SlashCommandBuilder()
-    .setName('profil')
-    .setDescription('📋 Voir ta fiche joueur')
-    .addUserOption(o => o.setName('joueur').setDescription('Voir le profil d\'un autre joueur')),
-
-  new SlashCommandBuilder()
-    .setName('classement')
-    .setDescription('🏆 Classement des équipes d\'une région')
-    .addStringOption(o => o.setName('region').setDescription('Région à afficher').setRequired(true)
-      .addChoices(
-        { name: '🇪🇺 LEC', value: 'LEC' }, { name: '🇺🇸 LCS', value: 'LCS' },
-        { name: '🇰🇷 LCK', value: 'LCK' }, { name: '🇨🇳 LPL', value: 'LPL' },
-        { name: '🇫🇷 LFL', value: 'LFL' },
+        { name: '⚡ Attaquant de fond',  value: 'Attaquant de fond'  },
+        { name: '🛡️ Défenseur de fond', value: 'Défenseur de fond'  },
+        { name: '🏹 Serveur-Volleyeur',  value: 'Serveur-Volleyeur'  },
+        { name: '🔥 Monteur au filet',   value: 'Monteur au filet'   },
+        { name: '🎯 Tout-terrain',       value: 'Tout-terrain'       },
       )),
 
   new SlashCommandBuilder()
-    .setName('top-players')
-    .setDescription('🌟 Top 10 des rookies Discord du serveur'),
+    .setName('link')
+    .setDescription('Associe ton compte Discord à ton joueur dans TM2026')
+    .addStringOption(o => o.setName('nom').setDescription('Prénom ou nom dans TM2026').setRequired(true)),
 
   new SlashCommandBuilder()
-    .setName('saison')
-    .setDescription('📅 État de la saison en cours'),
-
-  // ── Admin ─────────────────────────────────────────────────────
-  new SlashCommandBuilder()
-    .setName('start-season')
-    .setDescription('[ADMIN] Lancer la saison ou passer à la prochaine phase')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setName('profil')
+    .setDescription('Voir le profil complet et les stats d\'un joueur')
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur à consulter (toi par défaut)').setRequired(false)),
 
   new SlashCommandBuilder()
-    .setName('simulate-week')
-    .setDescription('[ADMIN] Simuler la semaine suivante')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setName('attributs')
+    .setDescription('Voir tous les attributs TM2026 d\'un joueur')
+    .addUserOption(o => o.setName('joueur').setDescription('Joueur à consulter (toi par défaut)').setRequired(false)),
 
   new SlashCommandBuilder()
-    .setName('import-data')
-    .setDescription('[ADMIN] Importer les JSON champions/teams/players dans MongoDB')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setName('coins')
+    .setDescription('Voir ton solde de coins et tes dernières transactions'),
 
   new SlashCommandBuilder()
-    .setName('reset')
-    .setDescription('[ADMIN] ⚠️ Reset complet du jeu (irréversible)')
-    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator),
+    .setName('admin')
+    .setDescription('Commandes admin')
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .addSubcommand(s => s
+      .setName('donner_coins')
+      .setDescription('Donner des coins à un joueur')
+      .addUserOption(o => o.setName('joueur').setDescription('Cible').setRequired(true))
+      .addIntegerOption(o => o.setName('montant').setDescription('Montant').setRequired(true).setMinValue(1))
+      .addStringOption(o => o.setName('raison').setDescription('Raison').setRequired(false)))
+    .addSubcommand(s => s
+      .setName('retirer_coins')
+      .setDescription('Retirer des coins à un joueur')
+      .addUserOption(o => o.setName('joueur').setDescription('Cible').setRequired(true))
+      .addIntegerOption(o => o.setName('montant').setDescription('Montant').setRequired(true).setMinValue(1))
+      .addStringOption(o => o.setName('raison').setDescription('Raison').setRequired(false)))
+    .addSubcommand(s => s
+      .setName('reload_db')
+      .setDescription('Force le rechargement du save.db depuis Supabase'))
+    .addSubcommand(s => s
+      .setName('info_db')
+      .setDescription('Infos sur le save.db actuellement chargé')),
 ];
 
-// ================================================================
-// HANDLERS — COMMANDES JOUEUR
-// ================================================================
+// ══════════════════════════════════════════════════════════════════════════════
+//  HANDLERS
+// ══════════════════════════════════════════════════════════════════════════════
+async function handleCommand(interaction) {
+  const cmd = interaction.commandName;
 
-async function handleCreate(interaction) {
-  await interaction.deferReply({ ephemeral: true });
+  // ── /inscription ─────────────────────────────────────────────────────────────
+  if (cmd === 'inscription') {
+    if (db.exists(interaction.user.id))
+      return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
 
-  const existing = await Player.findOne({ discordId: interaction.user.id });
-  if (existing) {
-    return interaction.editReply('❌ Tu as déjà un rookie ! Utilise `/profil` pour le voir.');
+    const ingameName  = interaction.options.getString('nom').trim();
+    const nationality = interaction.options.getString('nationalite').trim();
+    const playstyle   = interaction.options.getString('style');
+
+    if (db.nameTaken(ingameName))
+      return interaction.reply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)], ephemeral: true });
+    if (ingameName.length < 2 || ingameName.length > 32)
+      return interaction.reply({ embeds: [err('Le nom doit faire entre 2 et 32 caractères.')], ephemeral: true });
+
+    db.create({ discordId: interaction.user.id, username: interaction.user.username, ingameName, nationality, playstyle });
+    return interaction.reply({ embeds: [ok('Joueur créé !',
+      `Bienvenue **${ingameName}** 🎾\n\n` +
+      `🌍 **${nationality}** — ${PLAYSTYLE_EMOJI[playstyle] ?? ''} ${playstyle}\n` +
+      `💰 Solde de départ : **500 🪙**\n\n` +
+      `Utilise \`/link <nom>\` pour associer ton joueur TM2026 et afficher tes vraies stats !`
+    )]});
   }
 
-  const season = await Season.findOne({ isActive: true });
-  if (season && season.currentPhase !== 'REGISTRATION') {
-    return interaction.editReply('❌ La saison est déjà lancée, les inscriptions sont fermées pour ce cycle.');
-  }
+  // ── /link ─────────────────────────────────────────────────────────────────────
+  if (cmd === 'link') {
+    const player = db.get(interaction.user.id);
+    if (!player)
+      return interaction.reply({ embeds: [err('Crée d\'abord ton profil avec `/inscription`.')], ephemeral: true });
 
-  const nom      = interaction.options.getString('nom');
-  const role     = interaction.options.getString('role');
-  const nat      = interaction.options.getString('nationalite');
-  const champ1   = interaction.options.getString('champion_phare');
-  const champ2   = interaction.options.getString('champion2');
-  const champ3   = interaction.options.getString('champion3');
+    if (!seasonDbReady)
+      return interaction.reply({ embeds: [err('Save.db non disponible. Vérifie la configuration Supabase.')], ephemeral: true });
 
-  await Player.create({
-    discordId:      interaction.user.id,
-    discordUsername: interaction.user.username,
-    name:           nom,
-    role, nationality: nat,
-    mainChampion:   champ1,
-    championPool:   [champ1, champ2, champ3],
-  });
+    const query   = interaction.options.getString('nom').trim();
+    const results = searchTmPlayers(query);
 
-  const embed = new EmbedBuilder()
-    .setColor(0x2ecc71)
-    .setTitle('🌟 Rookie créé !')
-    .setDescription(`Bienvenue dans la scène pro, **${nom}** !`)
-    .addFields(
-      { name: `${ROLE_EMOJI[role]} Rôle`,    value: role,  inline: true },
-      { name: '🌍 Nationalité',               value: nat,   inline: true },
-      { name: '🏆 Champion phare',            value: champ1, inline: true },
-      { name: '📚 Pool complet',              value: [champ1, champ2, champ3].join(' · ') },
-      { name: '📋 Prochaine étape',           value: 'Utilise `/teams` pour choisir ton équipe !' },
-    )
-    .setFooter({ text: 'Âge : 16 ans · Réputation : 50/100' });
+    if (!results.length)
+      return interaction.reply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"** dans le save.db.`)], ephemeral: true });
 
-  return interaction.editReply({ embeds: [embed] });
-}
-
-async function handleTeams(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  const player = await Player.findOne({ discordId: interaction.user.id });
-  if (!player) {
-    return interaction.editReply('❌ Tu n\'as pas encore créé ton rookie ! Utilise `/create`.');
-  }
-  if (player.teamName) {
-    return interaction.editReply(`✅ Tu joues déjà pour **${player.teamName}** (${player.region}) !`);
-  }
-
-  const season = await Season.findOne({ isActive: true });
-  if (season && season.currentPhase !== 'REGISTRATION') {
-    return interaction.editReply('❌ La phase d\'inscription est terminée.');
-  }
-
-  // Récupérer 3 équipes sans joueur Discord, de régions variées si possible
-  const usedRegions = new Set();
-  const allAvail = await Team.find({ hasDiscordPlayer: false }).sort({ prestige: -1 });
-  const picks = [];
-
-  for (const t of allAvail) {
-    if (picks.length >= 3) break;
-    if (!usedRegions.has(t.region) || picks.length < 3) {
-      picks.push(t);
-      usedRegions.add(t.region);
+    if (results.length === 1) {
+      const tm = results[0];
+      db.linkTm(interaction.user.id, tm.Id);
+      return interaction.reply({ embeds: [ok('Joueur lié !',
+        `**${player.ingame_name}** est maintenant lié à **${tm.Firstname} ${tm.Lastname}** (${tm.Country}).\n\nUtilise \`/profil\` pour voir tes stats complets !`
+      )]});
     }
+
+    const lines = results.map((tm, i) =>
+      `\`${i + 1}.\` **${tm.Firstname} ${tm.Lastname}** (${tm.Country}) — ID \`${tm.Id}\``
+    ).join('\n');
+    return interaction.reply({ embeds: [
+      new EmbedBuilder().setColor(COLOR.blue)
+        .setTitle('🔍 Plusieurs joueurs trouvés')
+        .setDescription(`${lines}\n\nRefais \`/link\` avec le prénom + nom complet pour préciser.`)
+    ], ephemeral: true });
   }
 
-  if (picks.length === 0) {
-    return interaction.editReply('❌ Aucune équipe disponible. Utilise `/import-data` pour charger les équipes.');
-  }
+  // ── /profil ───────────────────────────────────────────────────────────────────
+  if (cmd === 'profil') {
+    const target = interaction.options.getUser('joueur') ?? interaction.user;
+    const player = db.get(target.id);
 
-  const embed = new EmbedBuilder()
-    .setColor(0x9b59b6)
-    .setTitle('🏟️ 3 équipes t\'ont fait une offre !')
-    .setDescription('Tu as **60 secondes** pour choisir. Ce choix est définitif pour la saison.')
-    .setFooter({ text: 'Chaque joueur Discord rejoint une équipe différente' });
+    if (!player) {
+      return interaction.reply({ embeds: [err(
+        target.id === interaction.user.id
+          ? 'Pas encore de joueur. Utilise `/inscription` !'
+          : `**${target.username}** n'a pas de joueur.`
+      )], ephemeral: true });
+    }
 
-  for (const t of picks) {
-    const regionInfo = REGIONS[t.region];
-    embed.addFields({
-      name: `${regionInfo?.emoji || '🌐'} ${t.name} (${t.region})`,
-      value: `⭐ Prestige : **${t.prestige}/100** · 💰 Budget : **${(t.budget / 1_000_000).toFixed(1)}M€**\n💸 Salaire estimé : ~**${Math.floor(t.prestige * 500 + 10000).toLocaleString('fr-FR')} €/mois**`,
+    const tmData = player.tm_player_id ? getTmPlayerData(player.tm_player_id) : null;
+    return interaction.reply({
+      embeds: [buildProfileEmbed(player, tmData, target.displayAvatarURL({ dynamic: true }))]
     });
   }
 
-  const row = new ActionRowBuilder().addComponents(
-    picks.map((t, i) =>
-      new ButtonBuilder()
-        .setCustomId(`join_${t._id}`)
-        .setLabel(t.name)
-        .setStyle([ButtonStyle.Primary, ButtonStyle.Success, ButtonStyle.Secondary][i] || ButtonStyle.Secondary)
-    )
-  );
+  // ── /attributs ────────────────────────────────────────────────────────────────
+  if (cmd === 'attributs') {
+    const target = interaction.options.getUser('joueur') ?? interaction.user;
+    const player = db.get(target.id);
 
-  const msg = await interaction.editReply({ embeds: [embed], components: [row] });
+    if (!player)
+      return interaction.reply({ embeds: [err(target.id === interaction.user.id ? 'Pas encore de joueur. Utilise `/inscription` !' : `**${target.username}** n'a pas de joueur.`)], ephemeral: true });
 
-  const collector = msg.createMessageComponentCollector({
-    componentType: ComponentType.Button,
-    time: 60_000,
-    filter: i => i.user.id === interaction.user.id,
-  });
+    if (!player.tm_player_id)
+      return interaction.reply({ embeds: [err('Aucun joueur TM2026 lié. Utilise `/link` d\'abord.')], ephemeral: true });
 
-  collector.on('collect', async (btn) => {
-    const teamId = btn.customId.replace('join_', '');
-    const team   = await Team.findById(teamId);
-    if (!team || team.hasDiscordPlayer) {
-      return btn.reply({ content: '❌ Cette équipe n\'est plus disponible.', ephemeral: true });
-    }
+    if (!seasonDbReady)
+      return interaction.reply({ embeds: [err('Save.db en cours de chargement, réessaie dans quelques secondes.')], ephemeral: true });
 
-    const salary = Math.floor(team.prestige * 500 + 10_000);
-    await Player.updateOne({ discordId: interaction.user.id }, {
-      teamId: team._id, teamName: team.name, region: team.region,
-      salary, isReady: true,
-    });
-    await Team.updateOne({ _id: team._id }, {
-      hasDiscordPlayer: true,
-      $push: { players: player._id },
-    });
+    const s = openSaveDb();
+    if (!s) return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
 
-    const successEmbed = new EmbedBuilder()
-      .setColor(0x2ecc71)
-      .setTitle('✅ Contrat signé !')
-      .setDescription(`Tu rejoins **${team.name}** (${team.region}) !\n💸 Salaire : **${salary.toLocaleString('fr-FR')} €/mois**`)
-      .setFooter({ text: 'Bonne chance pour la saison ! 🍀' });
+    let p;
+    try { p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(player.tm_player_id); }
+    finally { s.close(); }
 
-    await btn.update({ embeds: [successEmbed], components: [] });
-    collector.stop();
-  });
+    if (!p) return interaction.reply({ embeds: [err('Joueur TM introuvable dans le save.db.')], ephemeral: true });
 
-  collector.on('end', async (col) => {
-    if (col.size === 0) {
-      const expired = new ActionRowBuilder().addComponents(
-        picks.map(t =>
-          new ButtonBuilder()
-            .setCustomId(`exp_${t._id}`)
-            .setLabel(t.name)
-            .setStyle(ButtonStyle.Secondary)
-            .setDisabled(true)
-        )
-      );
-      await interaction.editReply({ components: [expired] }).catch(() => {});
-    }
-  });
-}
-
-async function handleProfil(interaction) {
-  await interaction.deferReply();
-  const target = interaction.options.getUser('joueur') || interaction.user;
-  const player = await Player.findOne({ discordId: target.id });
-  if (!player) {
-    return interaction.editReply(`❌ **${target.username}** n'a pas encore créé son rookie.`);
-  }
-  return interaction.editReply({ embeds: [embedProfil(player)] });
-}
-
-async function handleClassement(interaction) {
-  await interaction.deferReply();
-  const region = interaction.options.getString('region');
-  const teams  = await Team.find({ region }).sort({ points: -1 });
-  if (teams.length === 0) {
-    return interaction.editReply(`❌ Aucune équipe en ${region}. Utilise \`/import-data\`.`);
-  }
-  return interaction.editReply({ embeds: [embedStandings(teams, region)] });
-}
-
-async function handleTopPlayers(interaction) {
-  await interaction.deferReply();
-  const players = await Player.find({ isReady: true })
-    .sort({ reputation: -1, 'stats.wins': -1 })
-    .limit(10);
-
-  if (players.length === 0) {
-    return interaction.editReply('❌ Aucun rookie inscrit pour le moment.');
-  }
-
-  const medals = ['🥇', '🥈', '🥉'];
-  const lines = players.map((p, i) => {
-    const gp = p.stats.wins + p.stats.losses;
-    const wr = gp === 0 ? '—' : `${Math.round((p.stats.wins / gp) * 100)}%`;
-    const kda = p.stats.deaths === 0
-      ? '∞'
-      : ((p.stats.kills + p.stats.assists) / p.stats.deaths).toFixed(2);
-    return `${medals[i] || `**${i + 1}.**`} **${p.name}** (${ROLE_EMOJI[p.role]}${p.role} · ${p.teamName || 'Libre'})\n⭐ ${p.reputation} rep · KDA ${kda} · WR ${wr} · Lv.${p.level}`;
-  }).join('\n\n');
-
-  const embed = new EmbedBuilder()
-    .setColor(0xf39c12)
-    .setTitle('🌟 Top 10 — Rookies LoL Manager')
-    .setDescription(lines)
-    .setTimestamp();
-
-  return interaction.editReply({ embeds: [embed] });
-}
-
-async function handleSaison(interaction) {
-  await interaction.deferReply();
-  const season = await Season.findOne({ isActive: true });
-  if (!season) {
-    return interaction.editReply('❌ Aucune saison active. Un admin doit lancer `/start-season`.');
-  }
-
-  const total   = await Player.countDocuments();
-  const ready   = await Player.countDocuments({ isReady: true });
-  const phaseInfo = PHASES[season.currentPhase];
-
-  const embed = new EmbedBuilder()
-    .setColor(0x3498db)
-    .setTitle(`📅 Saison ${season.number} — ${season.year}`)
-    .addFields(
-      { name: '📍 Phase actuelle', value: phaseInfo?.label || season.currentPhase, inline: true },
-      { name: '📆 Semaine',        value: `${season.currentWeek}${phaseInfo?.weeks ? ` / ${phaseInfo.weeks}` : ''}`, inline: true },
-      { name: '👥 Rookies',        value: `${ready}/${total} ont rejoint une équipe`, inline: true },
-      { name: '📖 Description',    value: phaseInfo?.description || '—' },
-      { name: '🗺️ Régions',
-        value: Object.values(REGIONS).map(r => `${r.emoji} ${r.name}`).join(' · '),
-      },
-    )
-    .setFooter({ text: phaseInfo?.next ? `Prochaine phase : ${PHASES[phaseInfo.next]?.label || phaseInfo.next}` : 'Fin de saison' })
-    .setTimestamp();
-
-  return interaction.editReply({ embeds: [embed] });
-}
-
-// ================================================================
-// HANDLERS — COMMANDES ADMIN
-// ================================================================
-
-async function handleStartSeason(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  let season = await Season.findOne({ isActive: true });
-
-  // Première fois → créer la saison
-  if (!season) {
-    season = await Season.create({ number: 1, year: new Date().getFullYear() });
-    return interaction.editReply(
-      '✅ **Saison 1 créée !**\nLes joueurs peuvent maintenant utiliser `/create` puis `/teams`.\nUne fois tout le monde prêt, relance `/start-season` pour passer à l\'hiver !'
-    );
-  }
-
-  const currentPhase = season.currentPhase;
-  const phaseInfo    = PHASES[currentPhase];
-
-  // Vérifier si la phase actuelle est terminée
-  if (phaseInfo.weeks > 0 && season.currentWeek < phaseInfo.weeks) {
-    return interaction.editReply(
-      `⚠️ La phase **${phaseInfo.label}** est à la semaine ${season.currentWeek}/${phaseInfo.weeks}.\nUtilise \`/simulate-week\` pour avancer.`
-    );
-  }
-
-  const nextPhase = phaseInfo.next;
-  if (!nextPhase) {
-    return interaction.editReply('❌ La saison est terminée. Utilise `/reset` pour repartir.');
-  }
-
-  // Reset des stats d'équipes à chaque nouveau split régional
-  if (['WINTER', 'SPRING', 'SUMMER'].includes(nextPhase)) {
-    await Team.updateMany({}, { $set: { wins: 0, losses: 0, points: 0 } });
-  }
-
-  await Season.updateOne({ _id: season._id }, { currentPhase: nextPhase, currentWeek: 0 });
-
-  const embed = new EmbedBuilder()
-    .setColor(0x2ecc71)
-    .setTitle(`🚀 ${PHASES[nextPhase].label} — Ça commence !`)
-    .setDescription(PHASES[nextPhase].description)
-    .setFooter({ text: 'Utilise /simulate-week pour jouer semaine par semaine' });
-
-  await interaction.editReply({ embeds: [embed] });
-  // Annonce publique
-  await interaction.channel?.send({ embeds: [embed] }).catch(() => {});
-}
-
-async function handleSimulateWeek(interaction) {
-  await interaction.deferReply();
-
-  const season = await Season.findOne({ isActive: true });
-  if (!season) {
-    return interaction.editReply('❌ Aucune saison active. Lance `/start-season`.');
-  }
-
-  const { currentPhase, currentWeek } = season;
-  const phaseInfo = PHASES[currentPhase];
-
-  if (['REGISTRATION', 'OFFSEASON'].includes(currentPhase)) {
-    return interaction.editReply('❌ Impossible de simuler pendant la phase d\'inscription ou l\'intersaison.');
-  }
-
-  if (currentWeek >= (phaseInfo.weeks || 0)) {
-    return interaction.editReply(
-      `✅ La phase **${phaseInfo.label}** est terminée !\nLance \`/start-season\` pour passer à : **${PHASES[phaseInfo.next]?.label || 'Fin de saison'}**`
-    );
-  }
-
-  const newWeek = currentWeek + 1;
-  await Season.updateOne({ _id: season._id }, { currentWeek: newWeek });
-
-  let allMatches = [];
-
-  if (phaseInfo.isInternational) {
-    // Tournois internationaux
-    allMatches = await simulateInternational(season, currentPhase, newWeek);
-  } else {
-    // Splits régionaux : simuler chaque région
-    for (const regionKey of Object.keys(REGIONS)) {
-      const teams = await Team.find({ region: regionKey });
-      if (teams.length < 2) continue;
-      const regionResults = await simulateRegionWeek(season, regionKey, teams);
-      allMatches.push(...regionResults);
-    }
-  }
-
-  const embed = embedResults(allMatches, currentPhase, newWeek);
-
-  // Vérifier les level-ups
-  const players = await Player.find({ isReady: true });
-  const levelUps = [];
-  for (const p of players) {
-    const expectedLevel = computeLevel(p.experience);
-    if (expectedLevel > p.level) {
-      await Player.updateOne({ _id: p._id }, { level: expectedLevel });
-      levelUps.push({ name: p.name, level: expectedLevel });
-    }
-  }
-  if (levelUps.length > 0) {
-    embed.addFields({
-      name: '🆙 Level-ups cette semaine !',
-      value: levelUps.map(l => `**${l.name}** → Niveau ${l.level}`).join('\n'),
+    return interaction.reply({
+      embeds: [buildAttributesEmbed(player, p, target.displayAvatarURL({ dynamic: true }))]
     });
   }
 
-  return interaction.editReply({ embeds: [embed] });
-}
-
-async function handleImportData(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  const dataDir = path.join(__dirname, 'data');
-  if (!fs.existsSync(dataDir)) {
-    return interaction.editReply(
-      '❌ Dossier `./data/` introuvable.\n\nCrée-le et place tes fichiers :\n• `data/teams.json`\n• `data/champions.json`\n• `data/players.json` (optionnel)'
-    );
+  // ── /coins ────────────────────────────────────────────────────────────────────
+  if (cmd === 'coins') {
+    const player = db.get(interaction.user.id);
+    if (!player)
+      return interaction.reply({ embeds: [err('Pas encore de joueur. Utilise `/inscription` !')], ephemeral: true });
+    return interaction.reply({
+      embeds: [buildWalletEmbed(player, db.txHistory(interaction.user.id))],
+      ephemeral: true,
+    });
   }
 
-  const report = { teams: 0, players: 0, champions: 0, skipped: 0, errors: [] };
+  // ── /admin ────────────────────────────────────────────────────────────────────
+  if (cmd === 'admin') {
+    const sub = interaction.options.getSubcommand();
 
-  // ── Import teams.json ──────────────────────────────────────────
-  // Structure attendue : tableau d'objets ou { teams: [...] }
-  // Champs reconnus : name, shortName, region/league, prestige/strength, budget
-  const teamsFile = path.join(dataDir, 'teams.json');
-  if (fs.existsSync(teamsFile)) {
-    try {
-      const raw  = JSON.parse(fs.readFileSync(teamsFile, 'utf8'));
-      const list = Array.isArray(raw) ? raw : (raw.teams || raw.data?.teams || Object.values(raw));
+    if (sub === 'donner_coins') {
+      const target = interaction.options.getUser('joueur');
+      const amount = interaction.options.getInteger('montant');
+      const reason = interaction.options.getString('raison') ?? 'Don admin';
+      if (!db.exists(target.id)) return interaction.reply({ embeds: [err('Joueur non inscrit.')], ephemeral: true });
+      db.addCoins(target.id, amount, reason);
+      return interaction.reply({ embeds: [ok('Coins ajoutés', `**+${amount} 🪙** → <@${target.id}>\n*${reason}*`)], ephemeral: true });
+    }
 
-      for (const t of list) {
-        const name = t.name || t.teamName;
-        if (!name) continue;
-        const exists = await Team.findOne({ name });
-        if (!exists) {
-          await Team.create({
-            name,
-            shortName: t.shortName || t.abbr || name.substring(0, 3).toUpperCase(),
-            region:    t.region || t.league || 'LEC',
-            prestige:  t.prestige ?? t.strength ?? t.rating ?? (t.tier != null ? (5 - t.tier) * 15 + 50 : Math.floor(Math.random() * 30 + 50)),
-            budget:    t.budget ?? t.transferBudget ?? t.salaryBudget ?? 1_000_000,
-          });
-          report.teams++;
-        } else {
-          report.skipped++;
-        }
+    if (sub === 'retirer_coins') {
+      const target = interaction.options.getUser('joueur');
+      const amount = interaction.options.getInteger('montant');
+      const reason = interaction.options.getString('raison') ?? 'Retrait admin';
+      if (!db.exists(target.id)) return interaction.reply({ embeds: [err('Joueur non inscrit.')], ephemeral: true });
+      if (!db.removeCoins(target.id, amount, reason)) return interaction.reply({ embeds: [err('Solde insuffisant.')], ephemeral: true });
+      return interaction.reply({ embeds: [ok('Coins retirés', `**-${amount} 🪙** → <@${target.id}>\n*${reason}*`)], ephemeral: true });
+    }
+
+    if (sub === 'reload_db') {
+      await interaction.deferReply({ ephemeral: true });
+      seasonDbReady = false;
+      try {
+        await supabaseDownload();
+        seasonDbReady = true;
+        const info = getSaveDbInfo();
+        return interaction.editReply({ embeds: [ok('Save.db rechargé !',
+          info
+            ? `📅 Date : **${info.date}** | 👤 **${info.mainPlayer}** | 📦 **${info.size} Mo**`
+            : 'Rechargé avec succès.'
+        )]});
+      } catch (e) {
+        return interaction.editReply({ embeds: [err(`Échec du rechargement : ${e.message}`)] });
       }
-    } catch (e) {
-      report.errors.push(`teams.json : ${e.message}`);
+    }
+
+    if (sub === 'info_db') {
+      if (!seasonDbReady || !fs.existsSync(SEASON_DB_PATH))
+        return interaction.reply({ embeds: [err('Save.db non disponible. Configure les variables Supabase.')], ephemeral: true });
+
+      const info = getSaveDbInfo();
+      if (!info) return interaction.reply({ embeds: [err('Impossible de lire les infos du save.db.')], ephemeral: true });
+
+      const modLines = info.mods.length
+        ? info.mods.map(m => `• ${m.Name} v${m.ModVersion}`).join('\n')
+        : '*Aucun mod actif*';
+
+      return interaction.reply({ embeds: [
+        new EmbedBuilder().setColor(COLOR.blue)
+          .setTitle('🗄️ Infos save.db')
+          .addFields(
+            { name: '📅 Date en jeu',    value: info.date,               inline: true },
+            { name: '👤 Joueur principal', value: info.mainPlayer,       inline: true },
+            { name: '👥 Joueurs actifs',  value: `${info.nbActive}`,     inline: true },
+            { name: '📦 Taille',          value: `${info.size} Mo`,      inline: true },
+            { name: '🔧 Mods actifs',     value: modLines },
+          )
+      ], ephemeral: true });
     }
   }
-
-  // ── Import champions.json + free agents (via loadStaticData) ──
-  // Les données statiques sont chargées en mémoire globale.
-  // loadStaticData() est aussi appelée au démarrage, donc ces données
-  // survivent aux redémarrages sans nécessiter /import-data.
-  await loadStaticData();
-  report.champions = global.CHAMPIONS_DATA?.list.length ?? 0;
-
-  // ── Import players.json — NPC rostered uniquement ──────────────
-  // Les free agents sont gérés par loadStaticData() ci-dessus.
-  const playersFile = path.join(dataDir, 'players.json');
-  if (fs.existsSync(playersFile)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(playersFile, 'utf8'));
-      const rostered = raw.rostered_seeds || raw.data?.rostered_seeds || (Array.isArray(raw) ? raw : []);
-
-      for (const p of rostered) {
-        const teamSlug = p.teamId || p.team;
-        if (!teamSlug || teamSlug === 'fa') continue;
-        const team = await Team.findOne({
-          $or: [
-            { 'shortName': { $regex: new RegExp(`^${teamSlug}$`, 'i') } },
-            { 'name':      { $regex: new RegExp(teamSlug, 'i') }        },
-          ],
-        });
-        if (!team) continue;
-
-        const alreadyIn = (team.npcRoster || []).some(n => n.ign === p.ign);
-        if (alreadyIn) { report.skipped++; continue; }
-
-        const npc = {
-          ign:         p.ign,
-          name:        p.ign,
-          role:        p.role,
-          nationality: p.nationality || p.residency,
-          rating:      p.rating      ?? 50,
-          potential:   p.potential   ?? p.rating ?? 50,
-          salary:      p.salary      ?? 0,
-          marketValue: p.marketValue ?? 0,
-          reputation:  p.reputation  ?? 50,
-          personality: p.personality ?? 'standard',
-          mainChampion: Array.isArray(p.champions) ? (p.champions[0]?.[0] ?? p.champions[0] ?? null) : null,
-          championPool: Array.isArray(p.champions)
-            ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
-            : [],
-          contractEnd: p.contractEnd ?? null,
-          photo:       p.photo       ?? null,
-        };
-
-        await Team.updateOne({ _id: team._id }, { $push: { npcRoster: npc } });
-        report.players++;
-      }
-    } catch (e) {
-      report.errors.push(`players.json : ${e.message}`);
-    }
-  }
-
-  // ── Résumé ─────────────────────────────────────────────────────
-  const lines = [
-    `✅ **Import terminé**`,
-    `• Équipes importées : **${report.teams}**`,
-    `• Champions chargés en mémoire : **${report.champions}**`,
-    `• Joueurs NPC rattachés : **${report.players}**`,
-    `• Éléments ignorés (doublons) : **${report.skipped}**`,
-  ];
-  if (report.errors.length) {
-    lines.push(`\n⚠️ Erreurs :\n${report.errors.map(e => `\`${e}\``).join('\n')}`);
-  }
-  if (global.FREE_AGENT_NPCS?.length) {
-    lines.push(`• Free agents chargés en mémoire : **${global.FREE_AGENT_NPCS.length}**`);
-  }
-
-  return interaction.editReply(lines.join('\n'));
 }
 
-async function handleReset(interaction) {
-  await interaction.deferReply({ ephemeral: true });
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId('reset_yes').setLabel('⚠️ Confirmer le reset').setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId('reset_no').setLabel('Annuler').setStyle(ButtonStyle.Secondary),
-  );
-
-  const msg = await interaction.editReply({
-    content: '⚠️ **RESET TOTAL** — Suppression de tous les joueurs, saisons et matchs.\nLes équipes seront conservées mais réinitialisées.\n\nConfirmer ?',
-    components: [row],
-  });
-
-  const col = msg.createMessageComponentCollector({ componentType: ComponentType.Button, time: 15_000 });
-  col.on('collect', async (btn) => {
-    if (btn.customId === 'reset_yes') {
-      await Player.deleteMany({});
-      await Season.deleteMany({});
-      await Match.deleteMany({});
-      await Team.updateMany({}, {
-        $set: { wins: 0, losses: 0, points: 0, hasDiscordPlayer: false, players: [] },
-      });
-      await btn.update({ content: '✅ Reset effectué. Le jeu est vierge. Lance `/start-season` pour recommencer.', components: [] });
-    } else {
-      await btn.update({ content: '❌ Reset annulé.', components: [] });
-    }
-    col.stop();
-  });
-  col.on('end', async (c) => {
-    if (c.size === 0) await interaction.editReply({ content: '⌛ Délai expiré.', components: [] }).catch(() => {});
-  });
-}
-
-// ================================================================
-// DISCORD — ÉVÉNEMENTS
-// ================================================================
-
-client.once('ready', () => {
-  console.log(`✅ Bot connecté : ${client.user.tag}`);
-  console.log(`📡 Présent sur ${client.guilds.cache.size} serveur(s)`);
-  client.user.setActivity('LoL Manager 🎮', { type: 0 });
-});
-
-client.on('interactionCreate', async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  try {
-    switch (interaction.commandName) {
-      case 'create':          return await handleCreate(interaction);
-      case 'teams':           return await handleTeams(interaction);
-      case 'profil':          return await handleProfil(interaction);
-      case 'classement':      return await handleClassement(interaction);
-      case 'top-players':     return await handleTopPlayers(interaction);
-      case 'saison':          return await handleSaison(interaction);
-      case 'start-season':    return await handleStartSeason(interaction);
-      case 'simulate-week':   return await handleSimulateWeek(interaction);
-      case 'import-data':     return await handleImportData(interaction);
-      case 'reset':           return await handleReset(interaction);
-      default:
-        return interaction.reply({ content: '❓ Commande inconnue.', ephemeral: true });
-    }
-  } catch (err) {
-    console.error(`[/${interaction.commandName}]`, err);
-    const msg = { content: `❌ Erreur : \`${err.message}\``, ephemeral: true };
-    interaction.deferred ? await interaction.editReply(msg) : await interaction.reply(msg).catch(() => {});
-  }
-});
-
-// ================================================================
-// DÉMARRAGE
-// ================================================================
-
-async function registerCommands() {
+// ══════════════════════════════════════════════════════════════════════════════
+//  DÉPLOIEMENT & DÉMARRAGE
+// ══════════════════════════════════════════════════════════════════════════════
+async function deployCommands() {
   const rest = new REST({ version: '10' }).setToken(process.env.DISCORD_TOKEN);
+  console.log('📡 Déploiement des slash commands...');
   await rest.put(
     Routes.applicationGuildCommands(process.env.CLIENT_ID, process.env.GUILD_ID),
-    { body: commands.map(c => c.toJSON()) }
+    { body: COMMANDS_DATA.map(c => c.toJSON()) }
   );
-  console.log('✅ Slash commands enregistrées sur le serveur');
+  console.log('✅ Commandes déployées !');
 }
 
-// ================================================================
-// CHARGEMENT DES DONNÉES STATIQUES (champions + free agents)
-// Appelé au démarrage ET après /import-data pour survivre aux redémarrages
-// ================================================================
+if (process.argv.includes('--deploy')) {
+  deployCommands().catch(console.error);
+} else {
+  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-async function loadStaticData() {
-  const dataDir = path.join(__dirname, 'data');
+  client.once('ready', () => {
+    console.log(`🎾 Bot connecté : ${client.user.tag}`);
+  });
 
-  // ── Champions ──────────────────────────────────────────────────
-  const champFile = path.join(dataDir, 'champions.json');
-  if (fs.existsSync(champFile)) {
+  client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isChatInputCommand()) return;
     try {
-      const raw = JSON.parse(fs.readFileSync(champFile, 'utf8'));
-      const rolesMap     = raw.roles          || raw.data?.roles          || {};
-      const counterpicks = raw.counterpicks    || raw.data?.counterpicks   || [];
-      const synergies    = raw.synergies       || raw.data?.synergies      || [];
-      const aliases      = raw.display_aliases || raw.data?.display_aliases || {};
-
-      global.CHAMPIONS_DATA = {
-        roles: rolesMap,
-        counterpicks,
-        synergies,
-        aliases,
-        list: Object.keys(rolesMap),
-      };
-      console.log(`✅ Champions chargés en mémoire : ${global.CHAMPIONS_DATA.list.length}`);
+      await handleCommand(interaction);
     } catch (e) {
-      console.error(`⚠️ Erreur champions.json : ${e.message}`);
+      console.error(`Erreur /${interaction.commandName}:`, e);
+      const msg = { content: '❌ Une erreur est survenue.', ephemeral: true };
+      if (interaction.replied || interaction.deferred) interaction.followUp(msg);
+      else interaction.reply(msg);
     }
-  } else {
-    console.warn('⚠️ data/champions.json introuvable — CHAMPIONS_DATA non chargé');
-  }
+  });
 
-  // ── Free Agents ────────────────────────────────────────────────
-  const playersFile = path.join(dataDir, 'players.json');
-  if (fs.existsSync(playersFile)) {
-    try {
-      const raw = JSON.parse(fs.readFileSync(playersFile, 'utf8'));
-      const freeAgents = raw.free_agent_seeds || raw.data?.free_agent_seeds || [];
-
-      global.FREE_AGENT_NPCS = freeAgents.map(p => ({
-        ign:          p.ign,
-        name:         p.ign,
-        role:         p.role,
-        nationality:  p.nationality || p.residency,
-        rating:       p.rating      ?? 50,
-        potential:    p.potential   ?? p.rating ?? 50,
-        salary:       p.salary      ?? 0,
-        marketValue:  p.marketValue ?? 0,
-        reputation:   p.reputation  ?? 50,
-        personality:  p.personality ?? 'standard',
-        mainChampion: Array.isArray(p.champions)
-          ? (p.champions[0]?.[0] ?? p.champions[0] ?? null)
-          : null,
-        championPool: Array.isArray(p.champions)
-          ? p.champions.slice(0, 5).map(c => Array.isArray(c) ? c[0] : c)
-          : [],
-        contractEnd:  p.contractEnd ?? null,
-        photo:        p.photo       ?? null,
-      }));
-      console.log(`✅ Free agents chargés en mémoire : ${global.FREE_AGENT_NPCS.length}`);
-    } catch (e) {
-      console.error(`⚠️ Erreur players.json : ${e.message}`);
-    }
-  } else {
-    global.FREE_AGENT_NPCS = [];
-    console.warn('⚠️ data/players.json introuvable — FREE_AGENT_NPCS vide');
-  }
+  client.login(process.env.DISCORD_TOKEN);
 }
-
-async function main() {
-  if (!process.env.DISCORD_TOKEN || !process.env.MONGODB_URI || !process.env.CLIENT_ID || !process.env.GUILD_ID) {
-    console.error('❌ Variables d\'environnement manquantes. Vérifie ton fichier .env');
-    process.exit(1);
-  }
-
-  await mongoose.connect(process.env.MONGODB_URI);
-  console.log('✅ MongoDB connecté');
-
-  // Chargement des données statiques depuis les JSON (survit aux redémarrages)
-  await loadStaticData();
-
-  await registerCommands();
-  await client.login(process.env.DISCORD_TOKEN);
-}
-
-main().catch(err => {
-  console.error('❌ Erreur fatale au démarrage :', err);
-  process.exit(1);
-});
