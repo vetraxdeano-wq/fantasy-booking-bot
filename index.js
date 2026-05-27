@@ -36,6 +36,13 @@
 	  SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
 	} = require('discord.js');
 	const Database = require('better-sqlite3');
+	const { createClient } = require('@supabase/supabase-js');
+
+	// ─── Supabase client (pour bot.db persistant) ────────────────────────────────
+	const supabase = createClient(
+	  process.env.SUPABASE_URL,
+	  process.env.SUPABASE_KEY
+	);
 
 	// ─── Serveur HTTP (Render Web Service) ───────────────────────────────────────
 http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
@@ -109,51 +116,56 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 	  });
 
 	// ══════════════════════════════════════════════════════════════════════════════
-	//  BASE DE DONNÉES LOCALE (économie)
+	//  BASE DE DONNÉES JOUEURS — Supabase (persistante, survive aux re-deploys)
+	//  Tables requises dans Supabase :
+	//    players(discord_id text PK, username text, ingame_name text,
+	//            nationality text, playstyle text, tm_player_id int8,
+	//            coins int8 default 500, created_at timestamptz default now())
+	//    transactions(id bigserial PK, discord_id text, amount int8,
+	//                 reason text, created_at timestamptz default now())
 	// ══════════════════════════════════════════════════════════════════════════════
-	const botDb = new Database(BOT_DB_PATH);
-	botDb.exec(`
-	  CREATE TABLE IF NOT EXISTS players (
-		discord_id   TEXT PRIMARY KEY,
-		username     TEXT NOT NULL,
-		ingame_name  TEXT NOT NULL,
-		nationality  TEXT NOT NULL,
-		playstyle    TEXT NOT NULL,
-		tm_player_id INTEGER DEFAULT NULL,
-		coins        INTEGER DEFAULT 500,
-		created_at   TEXT DEFAULT (datetime('now'))
-	  );
-	  CREATE TABLE IF NOT EXISTS transactions (
-		id          INTEGER PRIMARY KEY AUTOINCREMENT,
-		discord_id  TEXT    NOT NULL,
-		amount      INTEGER NOT NULL,
-		reason      TEXT    NOT NULL,
-		created_at  TEXT    DEFAULT (datetime('now'))
-	  );
-	`);
 
 	const db = {
-	  get:         (id)       => botDb.prepare('SELECT * FROM players WHERE discord_id=?').get(id),
-	  exists:      (id)       => !!db.get(id),
-	  nameTaken:   (name)     => !!botDb.prepare('SELECT 1 FROM players WHERE LOWER(ingame_name)=LOWER(?)').get(name),
-	  create:      (p)        => botDb.prepare(
-		'INSERT INTO players (discord_id,username,ingame_name,nationality,playstyle) VALUES (?,?,?,?,?)'
-	  ).run(p.discordId, p.username, p.ingameName, p.nationality, p.playstyle),
-	  linkTm:      (id, tmId) => botDb.prepare('UPDATE players SET tm_player_id=? WHERE discord_id=?').run(tmId, id),
-	  addCoins:    (id, n, r) => {
-		botDb.prepare('UPDATE players SET coins=coins+? WHERE discord_id=?').run(n, id);
-		botDb.prepare('INSERT INTO transactions (discord_id,amount,reason) VALUES (?,?,?)').run(id, n, r ?? 'Gain');
+	  get: async (id) => {
+		const { data } = await supabase.from('players').select('*').eq('discord_id', id).single();
+		return data ?? null;
 	  },
-	  removeCoins: (id, n, r) => {
-		const p = db.get(id);
+	  exists: async (id) => {
+		const { data } = await supabase.from('players').select('discord_id').eq('discord_id', id).single();
+		return !!data;
+	  },
+	  nameTaken: async (name) => {
+		const { data } = await supabase.from('players').select('discord_id').ilike('ingame_name', name).single();
+		return !!data;
+	  },
+	  create: async (p) => {
+		await supabase.from('players').insert({
+		  discord_id: p.discordId, username: p.username, ingame_name: p.ingameName,
+		  nationality: p.nationality, playstyle: p.playstyle, coins: 500,
+		});
+	  },
+	  linkTm: async (id, tmId) => {
+		await supabase.from('players').update({ tm_player_id: tmId }).eq('discord_id', id);
+	  },
+	  addCoins: async (id, n, r) => {
+		const { data: p } = await supabase.from('players').select('coins').eq('discord_id', id).single();
+		if (!p) return;
+		await supabase.from('players').update({ coins: p.coins + n }).eq('discord_id', id);
+		await supabase.from('transactions').insert({ discord_id: id, amount: n, reason: r ?? 'Gain' });
+	  },
+	  removeCoins: async (id, n, r) => {
+		const { data: p } = await supabase.from('players').select('coins').eq('discord_id', id).single();
 		if (!p || p.coins < n) return false;
-		botDb.prepare('UPDATE players SET coins=coins-? WHERE discord_id=?').run(n, id);
-		botDb.prepare('INSERT INTO transactions (discord_id,amount,reason) VALUES (?,?,?)').run(id, -n, r ?? 'Dépense');
+		await supabase.from('players').update({ coins: p.coins - n }).eq('discord_id', id);
+		await supabase.from('transactions').insert({ discord_id: id, amount: -n, reason: r ?? 'Dépense' });
 		return true;
 	  },
-	  txHistory:   (id, lim=5) => botDb.prepare(
-		'SELECT * FROM transactions WHERE discord_id=? ORDER BY created_at DESC LIMIT ?'
-	  ).all(id, lim),
+	  txHistory: async (id, lim = 5) => {
+		const { data } = await supabase.from('transactions')
+		  .select('*').eq('discord_id', id)
+		  .order('created_at', { ascending: false }).limit(lim);
+		return data ?? [];
+	  },
 	};
 
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -295,6 +307,128 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		  AND Retired=0 LIMIT 10
 		`).all(`%${query}%`, `%${query}%`, `%${query}%`);
 	  } catch { return []; }
+	  finally { s.close(); }
+	}
+
+	// ── Catégories de tournois ───────────────────────────────────────────────────
+	const TOURN_CAT = { 0: 'Grand Chelem', 1: 'Masters 1000', 2: 'ATP 500', 3: 'ATP 250', 4: 'Masters Cup' };
+	const TOURN_CAT_EMOJI = { 0: '🏆', 1: '🥇', 2: '🥈', 3: '🥉', 4: '👑' };
+
+	function getTmPlayerByName(query) {
+	  const s = openSaveDb();
+	  if (!s) return [];
+	  try {
+		return s.prepare(`
+		  SELECT Id, Firstname, Lastname, Country FROM TennisPlayer
+		  WHERE (Firstname LIKE ? OR Lastname LIKE ? OR (Firstname||' '||Lastname) LIKE ?)
+		  LIMIT 10
+		`).all(`%${query}%`, `%${query}%`, `%${query}%`);
+	  } catch { return []; }
+	  finally { s.close(); }
+	}
+
+	// Stats complètes d'un joueur TM par son Id (sans compte Discord)
+	function getTmPlayerFullStats(tmId) {
+	  return getTmPlayerData(tmId); // réutilise la fonction existante
+	}
+
+	// Head 2 Head entre deux joueurs TM
+	function getH2H(id1, id2) {
+	  const s = openSaveDb();
+	  if (!s) return null;
+	  try {
+		// Cherche les matchs dans MatchResult où les deux joueurs s'affrontent
+		// Structure TM2026 : MatchResult(WinnerId, LoserId, TournamentId, Round, Date, ...)
+		const wins1 = s.prepare(`
+		  SELECT COUNT(*) AS cnt FROM MatchResult
+		  WHERE WinnerId=? AND LoserId=?
+		`).get(id1, id2)?.cnt ?? 0;
+
+		const wins2 = s.prepare(`
+		  SELECT COUNT(*) AS cnt FROM MatchResult
+		  WHERE WinnerId=? AND LoserId=?
+		`).get(id2, id1)?.cnt ?? 0;
+
+		// Derniers matchs entre les deux
+		const meetings = s.prepare(`
+		  SELECT mr.*, t.Name AS TournName, t.Category
+		  FROM MatchResult mr
+		  JOIN Tournament t ON t.Id = mr.TournamentId
+		  WHERE (mr.WinnerId=? AND mr.LoserId=?) OR (mr.WinnerId=? AND mr.LoserId=?)
+		  ORDER BY mr.Date DESC LIMIT 10
+		`).all(id1, id2, id2, id1);
+
+		// Surface breakdown
+		const surfH2H = s.prepare(`
+		  SELECT mr.Surface, 
+		    SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS w1,
+		    SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS w2,
+		    COUNT(*) AS total
+		  FROM MatchResult mr
+		  WHERE (mr.WinnerId=? AND mr.LoserId=?) OR (mr.WinnerId=? AND mr.LoserId=?)
+		  GROUP BY mr.Surface
+		`).all(id1, id2, id1, id2, id2, id1);
+
+		return { wins1, wins2, meetings, surfH2H };
+	  } catch (e) { console.error('H2H error:', e.message); return null; }
+	  finally { s.close(); }
+	}
+
+	// Palmarès filtré par catégorie (Grand Chelem, Masters 1000, etc.)
+	function getTmPalmares(tmId) {
+	  const s = openSaveDb();
+	  if (!s) return null;
+	  try {
+		const titles = s.prepare(`
+		  SELECT t.Name, t.Category, tr.Year, tr.MoneyWon, tr.RoundReached
+		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
+		  ORDER BY t.Category ASC, tr.Year DESC
+		`).all(tmId);
+
+		const finals = s.prepare(`
+		  SELECT t.Name, t.Category, tr.Year, tr.RoundReached
+		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=0
+		  ORDER BY t.Category ASC, tr.Year DESC
+		`).all(tmId);
+
+		// SF et QF aussi
+		const sf = s.prepare(`
+		  SELECT t.Name, t.Category, tr.Year, tr.RoundReached
+		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=1
+		  ORDER BY t.Category ASC, tr.Year DESC
+		`).all(tmId);
+
+		// Grouper les titres par catégorie
+		const byCategory = {};
+		for (const r of titles) {
+		  const cat = r.Category ?? 3;
+		  if (!byCategory[cat]) byCategory[cat] = [];
+		  byCategory[cat].push(r);
+		}
+
+		return { titles, finals, sf, byCategory };
+	  } catch (e) { console.error('Palmares error:', e.message); return null; }
+	  finally { s.close(); }
+	}
+
+	// Top classement mondial TM
+	function getTmClassement(limit = 20) {
+	  const s = openSaveDb();
+	  if (!s) return [];
+	  try {
+		return s.prepare(`
+		  SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country, tp.Age,
+		    r.Rank, r.Points
+		  FROM TennisPlayer tp
+		  JOIN Ranking r ON r.PlayerId = tp.Id
+		  WHERE tp.Retired=0 AND r.Circuit=0
+		    AND r.Date = (SELECT MAX(Date) FROM Ranking WHERE PlayerId=tp.Id AND Circuit=0)
+		  ORDER BY r.Rank ASC LIMIT ?
+		`).all(limit);
+	  } catch (e) { console.error('Classement error:', e.message); return []; }
 	  finally { s.close(); }
 	}
 
@@ -489,10 +623,160 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		.addFields({ name: 'Solde actuel', value: `**${player.coins.toLocaleString()} 🪙**` });
 	  if (txs.length) {
 		const lines = txs.map(t =>
-		  `${t.amount > 0 ? '📈' : '📉'} \`${t.amount > 0 ? '+' : ''}${t.amount}\` — ${t.reason} *(${t.created_at.split(' ')[0]})*`
+		  `${t.amount > 0 ? '📈' : '📉'} \`${t.amount > 0 ? '+' : ''}${t.amount}\` — ${t.reason} *(${t.created_at.split('T')[0]})*`
 		).join('\n');
 		embed.addFields({ name: '📋 Dernières transactions', value: lines });
 	  }
+	  return embed;
+	}
+
+	function buildPublicStatsEmbed(tm) {
+	  const { p, rank, race, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tm;
+	  const name = `${p.Firstname} ${p.Lastname}`;
+	  const embed = new EmbedBuilder()
+		.setColor(COLOR.tennis)
+		.setTitle(`🎾 ${name} (${p.Country ?? '??'})`)
+		.setDescription(
+		  `${HAND_LABEL[p.Hand] ?? ''} — ${BH_LABEL[p.Backhand] ?? ''} | Age : **${age(p.Birthdate)}** ans\n` +
+		  `Classement : **#${rank.Rank ?? '?'}** (${(rank.Points ?? 0).toLocaleString()} pts) | Race : **#${race.RaceRank ?? '?'}**`
+		)
+		.setFooter({ text: 'Tennis Manager 2026 — Stats publiques' })
+		.setTimestamp();
+
+	  embed.addFields(
+		{ name: '🏆 Titres', value: `**${titles}**`, inline: true },
+		{ name: '🥈 Finales', value: `**${finals}**`, inline: true },
+		{ name: '📊 Bilan', value: stats.played ? `**${stats.won}V** / ${stats.played - stats.won}D (${pct(stats.won, stats.played)})` : '—', inline: true },
+	  );
+
+	  if (stats.played) {
+		embed.addFields(
+		  { name: '🎾 Aces', value: `${stats.aces ?? 0}`, inline: true },
+		  { name: '💥 1er service', value: pct(stats.fs1w, stats.fs1p), inline: true },
+		  { name: '⚡ BP convertis', value: pct(stats.bpConv, stats.bpOpp), inline: true },
+		);
+	  }
+
+	  if (surfStats.length) {
+		const lines = surfStats.map(s =>
+		  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
+		).join('\n');
+		embed.addFields({ name: '🌍 Bilan par surface', value: lines });
+	  }
+
+	  if (lastResults.length) {
+		const lines = lastResults.map(r =>
+		  `${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+		).join('\n');
+		embed.addFields({ name: '📋 Derniers résultats', value: lines });
+	  }
+
+	  if (injuries.length) {
+		embed.addFields({ name: '🩹 Blessures', value: injuries.map(i => `• Zone ${i.Zone} (Type ${i.Type})`).join('\n') });
+	  }
+
+	  embed.addFields({ name: '💵 Gains carrière', value: moneyFmt(totalMoney), inline: true });
+	  return embed;
+	}
+
+	function buildH2HEmbed(p1, p2, h2h) {
+	  const name1 = `${p1.Firstname} ${p1.Lastname}`;
+	  const name2 = `${p2.Firstname} ${p2.Lastname}`;
+	  const total = h2h.wins1 + h2h.wins2;
+
+	  const bar1 = total > 0 ? Math.round(h2h.wins1 / total * 10) : 5;
+	  const bar2 = 10 - bar1;
+	  const barStr = `${'🟢'.repeat(bar1)}${'🔴'.repeat(bar2)}`;
+
+	  const embed = new EmbedBuilder()
+		.setColor(COLOR.blue)
+		.setTitle(`⚔️ Head-to-Head`)
+		.setDescription(
+		  `**${name1}** (${p1.Country}) vs **${name2}** (${p2.Country})\n\n` +
+		  `${barStr}\n` +
+		  `**${h2h.wins1}** — ${total} matchs — **${h2h.wins2}**`
+		)
+		.setFooter({ text: 'Tennis Manager 2026 — H2H' })
+		.setTimestamp();
+
+	  // Breakdown par surface
+	  if (h2h.surfH2H.length) {
+		const surfLines = h2h.surfH2H.map(s => {
+		  const label = SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`;
+		  return `${label} : **${s.w1}**–**${s.w2}** (${s.total} matchs)`;
+		}).join('\n');
+		embed.addFields({ name: '🏟️ Par surface', value: surfLines });
+	  }
+
+	  // Derniers matchs
+	  if (h2h.meetings.length) {
+		const lines = h2h.meetings.map(m => {
+		  const winner = m.WinnerId === p1.Id ? name1 : name2;
+		  const catLabel = TOURN_CAT_EMOJI[m.Category] ?? '🎾';
+		  return `${catLabel} **${winner}** — ${m.TournName} (${ROUND_LABEL[String(m.Round)] ?? `R${m.Round}`})`;
+		}).join('\n');
+		embed.addFields({ name: '📋 Derniers matchs', value: lines.slice(0, 1024) });
+	  } else {
+		embed.addFields({ name: '📋 Matchs', value: '*Aucun match trouvé entre ces deux joueurs.*' });
+	  }
+
+	  return embed;
+	}
+
+	function buildPalmaresEmbed(p, palmares) {
+	  const name = `${p.Firstname} ${p.Lastname}`;
+	  const embed = new EmbedBuilder()
+		.setColor(COLOR.gold)
+		.setTitle(`🏆 Palmarès — ${name} (${p.Country})`)
+		.setFooter({ text: 'Tennis Manager 2026 — Palmarès' })
+		.setTimestamp();
+
+	  const totalTitles = palmares.titles.length;
+	  const totalFinals = palmares.finals.length;
+	  embed.setDescription(`**${totalTitles}** titre${totalTitles > 1 ? 's' : ''} — **${totalFinals}** finale${totalFinals > 1 ? 's' : ''}`);
+
+	  // Titres par catégorie
+	  for (const [cat, results] of Object.entries(palmares.byCategory).sort((a, b) => a[0] - b[0])) {
+		const label = `${TOURN_CAT_EMOJI[cat] ?? '🎾'} ${TOURN_CAT[cat] ?? `Cat. ${cat}`}`;
+		const lines = results.map(r => `• **${r.Name}** (${r.Year})`).join('\n');
+		embed.addFields({ name: `${label} — ${results.length} titre${results.length > 1 ? 's' : ''}`, value: lines.slice(0, 1024) });
+	  }
+
+	  if (totalTitles === 0) {
+		embed.addFields({ name: 'Titres', value: '*Aucun titre remporté.*' });
+	  }
+
+	  // Finales perdues (top 5 par catégorie importante)
+	  const importantFinals = palmares.finals.filter(f => (f.Category ?? 3) <= 1).slice(0, 5);
+	  if (importantFinals.length) {
+		const lines = importantFinals.map(r =>
+		  `• ${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} **${r.Name}** (${r.Year})`
+		).join('\n');
+		embed.addFields({ name: '🥈 Finales perdues (GC/M1000)', value: lines });
+	  }
+
+	  return embed;
+	}
+
+	function buildClassementEmbed(rows) {
+	  const embed = new EmbedBuilder()
+		.setColor(COLOR.tennis)
+		.setTitle('🌍 Classement ATP — Top 20')
+		.setFooter({ text: 'Tennis Manager 2026 — Classement' })
+		.setTimestamp();
+
+	  if (!rows.length) {
+		embed.setDescription('*Classement non disponible.*');
+		return embed;
+	  }
+
+	  const medals = ['🥇', '🥈', '🥉'];
+	  const lines = rows.map((r, i) => {
+		const prefix = medals[i] ?? `**${r.Rank}.**`;
+		return `${prefix} ${r.Firstname} ${r.Lastname} (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
+	  }).join('\n');
+
+	  embed.setDescription(lines);
 	  return embed;
 	}
 
@@ -535,6 +819,26 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		.setDescription('Voir ton solde de coins et tes dernières transactions'),
 
 	  new SlashCommandBuilder()
+		.setName('stats')
+		.setDescription('Stats complètes d\'un joueur TM2026 (par nom, sans compte Discord requis)')
+		.addStringOption(o => o.setName('nom').setDescription('Prénom ou nom du joueur TM2026').setRequired(true)),
+
+	  new SlashCommandBuilder()
+		.setName('h2h')
+		.setDescription('Head-to-Head entre deux joueurs TM2026')
+		.addStringOption(o => o.setName('joueur1').setDescription('Prénom/nom du 1er joueur').setRequired(true))
+		.addStringOption(o => o.setName('joueur2').setDescription('Prénom/nom du 2ème joueur').setRequired(true)),
+
+	  new SlashCommandBuilder()
+		.setName('palmares')
+		.setDescription('Palmarès détaillé d\'un joueur (Grand Chelem, Masters 1000...)')
+		.addStringOption(o => o.setName('nom').setDescription('Prénom ou nom du joueur TM2026').setRequired(true)),
+
+	  new SlashCommandBuilder()
+		.setName('classement')
+		.setDescription('Classement ATP mondial du save.db (Top 20)'),
+
+	  new SlashCommandBuilder()
 		.setName('admin')
 		.setDescription('Commandes admin')
 		.setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -566,19 +870,19 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 	  // ── /inscription ─────────────────────────────────────────────────────────────
 	  if (cmd === 'inscription') {
-		if (db.exists(interaction.user.id))
+		if (await db.exists(interaction.user.id))
 		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
 
 		const ingameName  = interaction.options.getString('nom').trim();
 		const nationality = interaction.options.getString('nationalite').trim();
 		const playstyle   = interaction.options.getString('style');
 
-		if (db.nameTaken(ingameName))
+		if (await db.nameTaken(ingameName))
 		  return interaction.reply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)], ephemeral: true });
 		if (ingameName.length < 2 || ingameName.length > 32)
 		  return interaction.reply({ embeds: [err('Le nom doit faire entre 2 et 32 caractères.')], ephemeral: true });
 
-		db.create({ discordId: interaction.user.id, username: interaction.user.username, ingameName, nationality, playstyle });
+		await db.create({ discordId: interaction.user.id, username: interaction.user.username, ingameName, nationality, playstyle });
 		return interaction.reply({ embeds: [ok('Joueur créé !',
 		  `Bienvenue **${ingameName}** 🎾\n\n` +
 		  `🌍 **${nationality}** — ${PLAYSTYLE_EMOJI[playstyle] ?? ''} ${playstyle}\n` +
@@ -589,7 +893,7 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 	  // ── /link ─────────────────────────────────────────────────────────────────────
 	  if (cmd === 'link') {
-		const player = db.get(interaction.user.id);
+		const player = await db.get(interaction.user.id);
 		if (!player)
 		  return interaction.reply({ embeds: [err('Crée d\'abord ton profil avec `/inscription`.')], ephemeral: true });
 
@@ -604,7 +908,7 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 		if (results.length === 1) {
 		  const tm = results[0];
-		  db.linkTm(interaction.user.id, tm.Id);
+		  await db.linkTm(interaction.user.id, tm.Id);
 		  return interaction.reply({ embeds: [ok('Joueur lié !',
 			`**${player.ingame_name}** est maintenant lié à **${tm.Firstname} ${tm.Lastname}** (${tm.Country}).\n\nUtilise \`/profil\` pour voir tes stats complets !`
 		  )]});
@@ -623,7 +927,7 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 	  // ── /profil ───────────────────────────────────────────────────────────────────
 	  if (cmd === 'profil') {
 		const target = interaction.options.getUser('joueur') ?? interaction.user;
-		const player = db.get(target.id);
+		const player = await db.get(target.id);
 
 		if (!player) {
 		  return interaction.reply({ embeds: [err(
@@ -642,7 +946,7 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 	  // ── /attributs ────────────────────────────────────────────────────────────────
 	  if (cmd === 'attributs') {
 		const target = interaction.options.getUser('joueur') ?? interaction.user;
-		const player = db.get(target.id);
+		const player = await db.get(target.id);
 
 		if (!player)
 		  return interaction.reply({ embeds: [err(target.id === interaction.user.id ? 'Pas encore de joueur. Utilise `/inscription` !' : `**${target.username}** n'a pas de joueur.`)], ephemeral: true });
@@ -669,13 +973,107 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 	  // ── /coins ────────────────────────────────────────────────────────────────────
 	  if (cmd === 'coins') {
-		const player = db.get(interaction.user.id);
+		const player = await db.get(interaction.user.id);
 		if (!player)
 		  return interaction.reply({ embeds: [err('Pas encore de joueur. Utilise `/inscription` !')], ephemeral: true });
 		return interaction.reply({
-		  embeds: [buildWalletEmbed(player, db.txHistory(interaction.user.id))],
+		  embeds: [buildWalletEmbed(player, await db.txHistory(interaction.user.id))],
 		  ephemeral: true,
 		});
+	  }
+
+	  // ── /stats ───────────────────────────────────────────────────────────────────
+	  if (cmd === 'stats') {
+		if (!seasonDbReady)
+		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+
+		const query = interaction.options.getString('nom').trim();
+		const results = getTmPlayerByName(query);
+
+		if (!results.length)
+		  return interaction.reply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)], ephemeral: true });
+
+		if (results.length > 1) {
+		  const lines = results.map((r, i) =>
+			`\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+		  ).join('\n');
+		  return interaction.reply({ embeds: [
+			new EmbedBuilder().setColor(COLOR.blue)
+			  .setTitle('🔍 Plusieurs joueurs trouvés')
+			  .setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
+		  ], ephemeral: true });
+		}
+
+		const tm = getTmPlayerData(results[0].Id);
+		if (!tm) return interaction.reply({ embeds: [err('Impossible de lire les stats de ce joueur.')], ephemeral: true });
+
+		return interaction.reply({ embeds: [buildPublicStatsEmbed(tm)] });
+	  }
+
+	  // ── /h2h ─────────────────────────────────────────────────────────────────────
+	  if (cmd === 'h2h') {
+		if (!seasonDbReady)
+		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+
+		const q1 = interaction.options.getString('joueur1').trim();
+		const q2 = interaction.options.getString('joueur2').trim();
+
+		const r1 = getTmPlayerByName(q1);
+		const r2 = getTmPlayerByName(q2);
+
+		if (!r1.length) return interaction.reply({ embeds: [err(`Joueur **"${q1}"** introuvable.`)], ephemeral: true });
+		if (!r2.length) return interaction.reply({ embeds: [err(`Joueur **"${q2}"** introuvable.`)], ephemeral: true });
+
+		if (r1.length > 1)
+		  return interaction.reply({ embeds: [err(`Plusieurs joueurs pour "${q1}" — précise le nom complet.`)], ephemeral: true });
+		if (r2.length > 1)
+		  return interaction.reply({ embeds: [err(`Plusieurs joueurs pour "${q2}" — précise le nom complet.`)], ephemeral: true });
+
+		const p1 = r1[0], p2 = r2[0];
+		if (p1.Id === p2.Id)
+		  return interaction.reply({ embeds: [err('Les deux joueurs sont identiques.')], ephemeral: true });
+
+		const h2h = getH2H(p1.Id, p2.Id);
+		if (!h2h) return interaction.reply({ embeds: [err('Impossible de calculer le H2H.')], ephemeral: true });
+
+		return interaction.reply({ embeds: [buildH2HEmbed(p1, p2, h2h)] });
+	  }
+
+	  // ── /palmares ────────────────────────────────────────────────────────────────
+	  if (cmd === 'palmares') {
+		if (!seasonDbReady)
+		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+
+		const query = interaction.options.getString('nom').trim();
+		const results = getTmPlayerByName(query);
+
+		if (!results.length)
+		  return interaction.reply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)], ephemeral: true });
+
+		if (results.length > 1) {
+		  const lines = results.map((r, i) =>
+			`\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+		  ).join('\n');
+		  return interaction.reply({ embeds: [
+			new EmbedBuilder().setColor(COLOR.blue)
+			  .setTitle('🔍 Plusieurs joueurs trouvés')
+			  .setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
+		  ], ephemeral: true });
+		}
+
+		const palmares = getTmPalmares(results[0].Id);
+		if (!palmares) return interaction.reply({ embeds: [err('Impossible de lire le palmarès.')], ephemeral: true });
+
+		return interaction.reply({ embeds: [buildPalmaresEmbed(results[0], palmares)] });
+	  }
+
+	  // ── /classement ──────────────────────────────────────────────────────────────
+	  if (cmd === 'classement') {
+		if (!seasonDbReady)
+		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+
+		const rows = getTmClassement(20);
+		return interaction.reply({ embeds: [buildClassementEmbed(rows)] });
 	  }
 
 	  // ── /admin ────────────────────────────────────────────────────────────────────
@@ -686,8 +1084,8 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		  const target = interaction.options.getUser('joueur');
 		  const amount = interaction.options.getInteger('montant');
 		  const reason = interaction.options.getString('raison') ?? 'Don admin';
-		  if (!db.exists(target.id)) return interaction.reply({ embeds: [err('Joueur non inscrit.')], ephemeral: true });
-		  db.addCoins(target.id, amount, reason);
+		  if (!await db.exists(target.id)) return interaction.reply({ embeds: [err('Joueur non inscrit.')], ephemeral: true });
+		  await db.addCoins(target.id, amount, reason);
 		  return interaction.reply({ embeds: [ok('Coins ajoutés', `**+${amount} 🪙** → <@${target.id}>\n*${reason}*`)], ephemeral: true });
 		}
 
@@ -695,8 +1093,8 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		  const target = interaction.options.getUser('joueur');
 		  const amount = interaction.options.getInteger('montant');
 		  const reason = interaction.options.getString('raison') ?? 'Retrait admin';
-		  if (!db.exists(target.id)) return interaction.reply({ embeds: [err('Joueur non inscrit.')], ephemeral: true });
-		  if (!db.removeCoins(target.id, amount, reason)) return interaction.reply({ embeds: [err('Solde insuffisant.')], ephemeral: true });
+		  if (!await db.exists(target.id)) return interaction.reply({ embeds: [err('Joueur non inscrit.')], ephemeral: true });
+		  if (!await db.removeCoins(target.id, amount, reason)) return interaction.reply({ embeds: [err('Solde insuffisant.')], ephemeral: true });
 		  return interaction.reply({ embeds: [ok('Coins retirés', `**-${amount} 🪙** → <@${target.id}>\n*${reason}*`)], ephemeral: true });
 		}
 
