@@ -1654,7 +1654,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		return interaction.showModal(attrModal3);
 	  });
 
-	  // Étape 12 : modal attrs 3/3 soumis → validation total 180 pts → création joueur
+	  // Étape 12 : modal attrs 3/3 soumis → validation total 180 pts → modal attributs physiques
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isModalSubmit()) return;
 		if (!interaction.customId.startsWith('cj_attr3:')) return;
@@ -1682,6 +1682,61 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  });
 		}
 
+		cjSessions.set(interaction.user.id, { ...prev, a3 });
+
+		const physAttrModal = new ModalBuilder()
+		  .setCustomId(`cj_physattr:${interaction.user.id}`)
+		  .setTitle('Attributs physiques — 80 pts, max 20/stat');
+		physAttrModal.addComponents(
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_accel').setLabel('Accélération (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_jambes').setLabel('Jeu de jambes (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_equilibre').setLabel('Équilibre (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_agilite').setLabel('Agilité (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_capa_phys').setLabel('Capacité physique (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		);
+		return interaction.showModal(physAttrModal);
+	  });
+
+	  // Étape 13 : modal attributs physiques soumis → validation 80 pts → création joueur
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('cj_physattr:')) return;
+
+		const userId13 = interaction.customId.split(':')[1];
+		const prev = cjSessions.get(userId13) ?? cjSessions.get(interaction.user.id);
+		if (!prev) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		const parseAttr = (key) => {
+		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
+		  return isNaN(v) ? null : v;
+		};
+
+		const physAttrs = {
+		  acceleration:    parseAttr('p_accel'),
+		  jeu_de_jambes:   parseAttr('p_jambes'),
+		  equilibre:       parseAttr('p_equilibre'),
+		  agilite:         parseAttr('p_agilite'),
+		  capacite_physique: parseAttr('p_capa_phys'),
+		};
+
+		// Note: endurance est calculée automatiquement pour atteindre exactement 80 pts
+		const sumFive = Object.values(physAttrs).reduce((s, v) => s + (v ?? 0), 0);
+		for (const [k, v] of Object.entries(physAttrs)) {
+		  if (v === null || v < 1 || v > 20)
+			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
+		}
+		const endurance = 80 - sumFive;
+		if (endurance < 1 || endurance > 20) {
+		  return interaction.reply({
+			embeds: [err(`Total des 5 stats = **${sumFive}**. L'endurance calculée automatiquement serait **${endurance}** (doit être entre 1 et 20). Ajuste tes valeurs pour que le total des 5 stats soit entre 60 et 79. Relance \`/creer-joueur\`.`)],
+			ephemeral: true,
+		  });
+		}
+		physAttrs.endurance = endurance;
+
+		const allAttrs = { ...prev.a1, ...prev.a2, ...prev.a3 };
+		const totalTech = Object.values(allAttrs).reduce((s, v) => s + v, 0);
+
 		cjSessions.delete(interaction.user.id);
 
 		// Vérifications finales
@@ -1703,6 +1758,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  taille:      prev.taille,
 		  poids:       prev.poids,
 		  attrs:       allAttrs,
+		  physAttrs:   physAttrs,
 		});
 
 		const traitsLine = `🧠 **${prev.t1}** · **${prev.t2}** · **${prev.t3}**`;
@@ -1712,7 +1768,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  `⚡ **Divers** — Retour: ${allAttrs.retour} · Contre: ${allAttrs.contre} · Volée: ${allAttrs.volee}\n` +
 		  `🔄 **Effets** — Lift: ${allAttrs.lift} · Coupé: ${allAttrs.coupe} · Amorti: ${allAttrs.amorti}\n` +
 		  `🎛️ **Précision** — Contrôle: ${allAttrs.controle} · Timing: ${allAttrs.timing}\n` +
-		  `📊 **Total : ${total}/180**`;
+		  `📊 **Total technique : ${totalTech}/180**\n\n` +
+		  `🏃 **Physique** — Accél: ${physAttrs.acceleration} · Jambes: ${physAttrs.jeu_de_jambes} · Équilibre: ${physAttrs.equilibre} · Agilité: ${physAttrs.agilite} · Capa: ${physAttrs.capacite_physique} · Endurance: ${physAttrs.endurance}\n` +
+		  `📊 **Total physique : 80/80**`;
 
 		return interaction.reply({
 		  ephemeral: true,
