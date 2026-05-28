@@ -1577,7 +1577,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		// On ouvre la première des trois modales chaînées
 		const attrModal1 = new ModalBuilder()
 		  .setCustomId(`cj_attr1:${interaction.user.id}`)
-		  .setTitle('Attributs techniques (1/3) — 180 pts, max 20/stat');
+		  .setTitle('Attributs (1/3) — 180 pts, max 20/stat');
 		attrModal1.addComponents(
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_puiss_serv').setLabel('Puissance service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_effet_serv').setLabel('Effet service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
