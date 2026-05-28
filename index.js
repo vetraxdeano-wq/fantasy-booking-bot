@@ -1361,7 +1361,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  //  ÉTAPES CREER-JOUEUR : modal submit + select menus personnalité
 	  // ══════════════════════════════════════════════════════════════════════════════
 
-	  // Étape 2 : modal soumis → afficher sélecteur style de jeu
+	  // Étape 2 : modal soumis → afficher directement sélecteur trait 1 (style de jeu supprimé)
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isModalSubmit()) return;
 		if (interaction.customId !== 'creer_joueur_modal') return;
@@ -1376,39 +1376,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (await db.nameTaken(ingameName))
 		  return interaction.reply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)], ephemeral: true });
 
-		// Stocker les données en session mémoire, customId = userId seulement
+		// Stocker les données en session mémoire
 		cjSessions.set(interaction.user.id, { n: ingameName, p: nationality });
-
-		const styleSelect = new StringSelectMenuBuilder()
-		  .setCustomId(`cj_style:${interaction.user.id}`)
-		  .setPlaceholder('Choisis ton style de jeu')
-		  .addOptions(
-			{ label: '⚡ Attaquant de fond',  value: 'Attaquant de fond',  description: 'Frappe fort depuis le fond' },
-			{ label: '🛡️ Défenseur de fond', value: 'Défenseur de fond',  description: 'Solidité et régularité' },
-			{ label: '🏹 Serveur-Volleyeur',  value: 'Serveur-Volleyeur',  description: 'Service + montée au filet' },
-			{ label: '🔥 Monteur au filet',   value: 'Monteur au filet',   description: 'Agressif au filet' },
-			{ label: '🎯 Tout-terrain',       value: 'Tout-terrain',       description: 'Polyvalent sur toutes surfaces' },
-		  );
-
-		return interaction.reply({
-		  ephemeral: true,
-		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
-			.setTitle('🎾 Créer ton joueur — Style de jeu')
-			.setDescription(`**${ingameName}** · 🌍 ${nationality}\n\nChoisis ton style de jeu :`)],
-		  components: [new ActionRowBuilder().addComponents(styleSelect)],
-		});
-	  });
-
-	  // Étape 3 : style choisi → afficher sélecteur trait 1
-	  client.on('interactionCreate', async (interaction) => {
-		if (!interaction.isStringSelectMenu()) return;
-		if (!interaction.customId.startsWith('cj_style:')) return;
-
-		const userId = interaction.customId.split(':')[1];
-		const sess3 = cjSessions.get(userId) ?? cjSessions.get(interaction.user.id);
-		if (!sess3) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
-		const playstyle = interaction.values[0];
-		cjSessions.set(interaction.user.id, { ...sess3, s: playstyle });
 
 		const trait1Select = new StringSelectMenuBuilder()
 		  .setCustomId(`cj_t1:${interaction.user.id}`)
@@ -1421,10 +1390,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			{ label: '🚀 Ambitieux',    value: 'Ambitieux',    description: 'Vise toujours plus haut' },
 		  );
 
-		return interaction.update({
+		return interaction.reply({
+		  ephemeral: true,
 		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
 			.setTitle('🎾 Créer ton joueur — Personnalité (1/3)')
-			.setDescription(`**${ingameName}** · 🌍 ${nationality} · ${PLAYSTYLE_EMOJI[playstyle] ?? ''} ${playstyle}\n\n**1er trait de personnalité**`)],
+			.setDescription(`**${ingameName}** · 🌍 ${nationality}\n\n**1er trait de personnalité**`)],
 		  components: [new ActionRowBuilder().addComponents(trait1Select)],
 		});
 	  });
@@ -1455,7 +1425,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
 			.setTitle('🎾 Créer ton joueur — Personnalité (2/3)')
 			.setDescription(
-			  `**${sess4.n}** · 🌍 ${sess4.p} · ${PLAYSTYLE_EMOJI[sess4.s] ?? ''} ${sess4.s}\n\n` +
+			  `**${sess4.n}** · 🌍 ${sess4.p}\n\n` +
 			  `✅ Trait 1 : **${trait1}**\n\n**2e trait de personnalité**`
 			)],
 		  components: [new ActionRowBuilder().addComponents(trait2Select)],
@@ -1488,14 +1458,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
 			.setTitle('🎾 Créer ton joueur — Personnalité (3/3)')
 			.setDescription(
-			  `**${sess5.n}** · 🌍 ${sess5.p} · ${PLAYSTYLE_EMOJI[sess5.s] ?? ''} ${sess5.s}\n\n` +
+			  `**${sess5.n}** · 🌍 ${sess5.p}\n\n` +
 			  `✅ Trait 1 : **${sess5.t1}**\n✅ Trait 2 : **${trait2}**\n\n**3e trait de personnalité**`
 			)],
 		  components: [new ActionRowBuilder().addComponents(trait3Select)],
 		});
 	  });
 
-	  // Étape 6 : trait 3 choisi → création du joueur en base
+	  // Étape 6 : trait 3 choisi → modal caractéristiques physiques
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isStringSelectMenu()) return;
 		if (!interaction.customId.startsWith('cj_t3:')) return;
@@ -1504,38 +1474,256 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const prev = cjSessions.get(userId6) ?? cjSessions.get(interaction.user.id);
 		if (!prev) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
 		const trait3 = interaction.values[0];
+		cjSessions.set(interaction.user.id, { ...prev, t3: trait3 });
+
+		// Afficher le sélecteur Main principale
+		const mainSelect = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_main:${interaction.user.id}`)
+		  .setPlaceholder('Main principale')
+		  .addOptions(
+			{ label: '🤜 Droitier', value: 'Droitier', description: 'Joue de la main droite' },
+			{ label: '🤛 Gaucher',  value: 'Gaucher',  description: 'Joue de la main gauche' },
+		  );
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Caractéristiques (1/2)')
+			.setDescription(
+			  `**${prev.n}** · 🌍 ${prev.p}\n` +
+			  `🧠 **${prev.t1}** · **${prev.t2}** · **${trait3}**\n\n` +
+			  `**Main principale :**`
+			)],
+		  components: [new ActionRowBuilder().addComponents(mainSelect)],
+		});
+	  });
+
+	  // Étape 7 : main choisie → sélecteur revers
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_main:')) return;
+
+		const userId7 = interaction.customId.split(':')[1];
+		const sess7 = cjSessions.get(userId7) ?? cjSessions.get(interaction.user.id);
+		if (!sess7) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
+		const mainHand = interaction.values[0];
+		cjSessions.set(interaction.user.id, { ...sess7, main: mainHand });
+
+		const reversSelect = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_revers:${interaction.user.id}`)
+		  .setPlaceholder('Type de revers')
+		  .addOptions(
+			{ label: '☝️ Une main',   value: 'Une main',   description: 'Revers à une main' },
+			{ label: '✌️ Deux mains', value: 'Deux mains', description: 'Revers à deux mains' },
+		  );
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Caractéristiques (2/2)')
+			.setDescription(
+			  `**${sess7.n}** · 🌍 ${sess7.p}\n\n` +
+			  `✅ Main : **${mainHand}**\n\n` +
+			  `**Type de revers :**`
+			)],
+		  components: [new ActionRowBuilder().addComponents(reversSelect)],
+		});
+	  });
+
+	  // Étape 8 : revers choisi → modal taille/poids
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_revers:')) return;
+
+		const userId8 = interaction.customId.split(':')[1];
+		const sess8 = cjSessions.get(userId8) ?? cjSessions.get(interaction.user.id);
+		if (!sess8) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
+		const revers = interaction.values[0];
+		cjSessions.set(interaction.user.id, { ...sess8, revers });
+
+		const physModal = new ModalBuilder()
+		  .setCustomId(`cj_phys_modal:${interaction.user.id}`)
+		  .setTitle('Taille & Poids');
+		physModal.addComponents(
+		  new ActionRowBuilder().addComponents(
+			new TextInputBuilder().setCustomId('cj_taille').setLabel('Taille (ex: 185)').setStyle(TextInputStyle.Short).setPlaceholder('en cm').setRequired(true).setMinLength(2).setMaxLength(3)
+		  ),
+		  new ActionRowBuilder().addComponents(
+			new TextInputBuilder().setCustomId('cj_poids').setLabel('Poids (ex: 78)').setStyle(TextInputStyle.Short).setPlaceholder('en kg').setRequired(true).setMinLength(2).setMaxLength(3)
+		  ),
+		);
+		return interaction.showModal(physModal);
+	  });
+
+	  // Étape 9 : modal taille/poids soumis → modal attributs techniques (15 stats, 180 pts)
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('cj_phys_modal:')) return;
+
+		const userId9 = interaction.customId.split(':')[1];
+		const sess9 = cjSessions.get(userId9) ?? cjSessions.get(interaction.user.id);
+		if (!sess9) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		const tailleRaw = interaction.fields.getTextInputValue('cj_taille').trim();
+		const poidsRaw  = interaction.fields.getTextInputValue('cj_poids').trim();
+		const taille = parseInt(tailleRaw, 10);
+		const poids  = parseInt(poidsRaw, 10);
+		if (isNaN(taille) || taille < 140 || taille > 230)
+		  return interaction.reply({ embeds: [err('Taille invalide (entre 140 et 230 cm).')], ephemeral: true });
+		if (isNaN(poids) || poids < 40 || poids > 150)
+		  return interaction.reply({ embeds: [err('Poids invalide (entre 40 et 150 kg).')], ephemeral: true });
+
+		cjSessions.set(interaction.user.id, { ...sess9, taille, poids });
+
+		// Modal attributs techniques — 15 stats en 3 modales (max 5 inputs par modal Discord)
+		// On ouvre la première des trois modales chaînées
+		const attrModal1 = new ModalBuilder()
+		  .setCustomId(`cj_attr1:${interaction.user.id}`)
+		  .setTitle('Attributs techniques (1/3) — 180 pts, max 20/stat');
+		attrModal1.addComponents(
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_puiss_serv').setLabel('Puissance service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_effet_serv').setLabel('Effet service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_serv').setLabel('Régularité service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_cd').setLabel('Coup droit (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_cd').setLabel('Régularité coup droit (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		);
+		return interaction.showModal(attrModal1);
+	  });
+
+	  // Étape 10 : modal attrs 1/3 soumis → modal 2/3
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('cj_attr1:')) return;
+
+		const userId10 = interaction.customId.split(':')[1];
+		const sess10 = cjSessions.get(userId10) ?? cjSessions.get(interaction.user.id);
+		if (!sess10) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		const parseAttr = (key) => {
+		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
+		  return isNaN(v) ? null : v;
+		};
+		const a1 = { puiss_serv: parseAttr('a_puiss_serv'), effet_serv: parseAttr('a_effet_serv'), reg_serv: parseAttr('a_reg_serv'), cd: parseAttr('a_cd'), reg_cd: parseAttr('a_reg_cd') };
+		for (const [k, v] of Object.entries(a1)) {
+		  if (v === null || v < 1 || v > 20)
+			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
+		}
+		cjSessions.set(interaction.user.id, { ...sess10, a1 });
+
+		const attrModal2 = new ModalBuilder()
+		  .setCustomId(`cj_attr2:${interaction.user.id}`)
+		  .setTitle('Attributs techniques (2/3)');
+		attrModal2.addComponents(
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_revers').setLabel('Revers (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_rv').setLabel('Régularité revers (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_retour').setLabel('Retour (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_contre').setLabel('Contre (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_volee').setLabel('Volée (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		);
+		return interaction.showModal(attrModal2);
+	  });
+
+	  // Étape 11 : modal attrs 2/3 soumis → modal 3/3
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('cj_attr2:')) return;
+
+		const userId11 = interaction.customId.split(':')[1];
+		const sess11 = cjSessions.get(userId11) ?? cjSessions.get(interaction.user.id);
+		if (!sess11) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		const parseAttr = (key) => {
+		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
+		  return isNaN(v) ? null : v;
+		};
+		const a2 = { revers: parseAttr('a_revers'), reg_rv: parseAttr('a_reg_rv'), retour: parseAttr('a_retour'), contre: parseAttr('a_contre'), volee: parseAttr('a_volee') };
+		for (const [k, v] of Object.entries(a2)) {
+		  if (v === null || v < 1 || v > 20)
+			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
+		}
+		cjSessions.set(interaction.user.id, { ...sess11, a2 });
+
+		const attrModal3 = new ModalBuilder()
+		  .setCustomId(`cj_attr3:${interaction.user.id}`)
+		  .setTitle('Attributs techniques (3/3)');
+		attrModal3.addComponents(
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_lift').setLabel('Lift (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_coupe').setLabel('Coupé (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_amorti').setLabel('Amorti (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_controle').setLabel('Contrôle (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_timing').setLabel('Timing (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		);
+		return interaction.showModal(attrModal3);
+	  });
+
+	  // Étape 12 : modal attrs 3/3 soumis → validation total 180 pts → création joueur
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('cj_attr3:')) return;
+
+		const userId12 = interaction.customId.split(':')[1];
+		const prev = cjSessions.get(userId12) ?? cjSessions.get(interaction.user.id);
+		if (!prev) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		const parseAttr = (key) => {
+		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
+		  return isNaN(v) ? null : v;
+		};
+		const a3 = { lift: parseAttr('a_lift'), coupe: parseAttr('a_coupe'), amorti: parseAttr('a_amorti'), controle: parseAttr('a_controle'), timing: parseAttr('a_timing') };
+		for (const [k, v] of Object.entries(a3)) {
+		  if (v === null || v < 1 || v > 20)
+			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
+		}
+
+		const allAttrs = { ...prev.a1, ...prev.a2, ...a3 };
+		const total = Object.values(allAttrs).reduce((s, v) => s + v, 0);
+		if (total !== 180) {
+		  return interaction.reply({
+			embeds: [err(`Total des attributs = **${total}/180**. Tu dois répartir exactement 180 points. Relance \`/creer-joueur\`.`)],
+			ephemeral: true,
+		  });
+		}
+
 		cjSessions.delete(interaction.user.id);
 
 		// Vérifications finales
-		if (await db.exists(interaction.user.id)) {
-		  return interaction.update({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], components: [] });
-		}
-		if (await db.nameTaken(prev.n)) {
-		  return interaction.update({ embeds: [err(`Le nom **${prev.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], components: [] });
-		}
+		if (await db.exists(interaction.user.id))
+		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
+		if (await db.nameTaken(prev.n))
+		  return interaction.reply({ embeds: [err(`Le nom **${prev.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], ephemeral: true });
 
 		await db.create({
-		  discordId:  interaction.user.id,
-		  username:   interaction.user.username,
-		  ingameName: prev.n,
+		  discordId:   interaction.user.id,
+		  username:    interaction.user.username,
+		  ingameName:  prev.n,
 		  nationality: prev.p,
-		  playstyle:  prev.s,
-		  trait1: prev.t1,
-		  trait2: prev.t2,
-		  trait3,
+		  trait1:      prev.t1,
+		  trait2:      prev.t2,
+		  trait3:      prev.t3,
+		  mainHand:    prev.main,
+		  backhand:    prev.revers,
+		  taille:      prev.taille,
+		  poids:       prev.poids,
+		  attrs:       allAttrs,
 		});
 
-		const traitsLine = `🧠 **${prev.t1}** · **${prev.t2}** · **${trait3}**`;
+		const traitsLine = `🧠 **${prev.t1}** · **${prev.t2}** · **${prev.t3}**`;
+		const statsBlock =
+		  `🎯 **Service** — Puissance: ${allAttrs.puiss_serv} · Effet: ${allAttrs.effet_serv} · Régularité: ${allAttrs.reg_serv}\n` +
+		  `🏓 **Fond** — CD: ${allAttrs.cd} (rég. ${allAttrs.reg_cd}) · RV: ${allAttrs.revers} (rég. ${allAttrs.reg_rv})\n` +
+		  `⚡ **Divers** — Retour: ${allAttrs.retour} · Contre: ${allAttrs.contre} · Volée: ${allAttrs.volee}\n` +
+		  `🔄 **Effets** — Lift: ${allAttrs.lift} · Coupé: ${allAttrs.coupe} · Amorti: ${allAttrs.amorti}\n` +
+		  `🎛️ **Précision** — Contrôle: ${allAttrs.controle} · Timing: ${allAttrs.timing}\n` +
+		  `📊 **Total : ${total}/180**`;
 
-		return interaction.update({
+		return interaction.reply({
+		  ephemeral: true,
 		  embeds: [ok('Joueur créé ! 🎾',
 			`Bienvenue **${prev.n}** !\n\n` +
-			`🌍 ${prev.p}  —  ${PLAYSTYLE_EMOJI[prev.s] ?? ''} ${prev.s}\n` +
+			`🌍 ${prev.p}  —  ${prev.main} · Revers ${prev.revers}  —  📏 ${prev.taille} cm / ⚖️ ${prev.poids} kg\n` +
 			`${traitsLine}\n\n` +
+			`${statsBlock}\n\n` +
 			`💰 Solde de départ : **500 🪙**\n\n` +
-			`Utilise \`/link <nom>\` pour associer ton joueur TM2026 et afficher tes vraies stats !`
+			`Utilise \`/link <nom>\` pour associer ton joueur TM2026 !`
 		  )],
-		  components: [],
 		});
 	  });
 
