@@ -870,20 +870,21 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 	  // ── /inscription ─────────────────────────────────────────────────────────────
 	  if (cmd === 'inscription') {
+		await interaction.deferReply({ ephemeral: true });
 		if (await db.exists(interaction.user.id))
-		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')] });
 
 		const ingameName  = interaction.options.getString('nom').trim();
 		const nationality = interaction.options.getString('nationalite').trim();
 		const playstyle   = interaction.options.getString('style');
 
-		if (await db.nameTaken(ingameName))
-		  return interaction.reply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)], ephemeral: true });
 		if (ingameName.length < 2 || ingameName.length > 32)
-		  return interaction.reply({ embeds: [err('Le nom doit faire entre 2 et 32 caractères.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Le nom doit faire entre 2 et 32 caractères.')] });
+		if (await db.nameTaken(ingameName))
+		  return interaction.editReply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)] });
 
 		await db.create({ discordId: interaction.user.id, username: interaction.user.username, ingameName, nationality, playstyle });
-		return interaction.reply({ embeds: [ok('Joueur créé !',
+		return interaction.editReply({ embeds: [ok('Joueur créé !',
 		  `Bienvenue **${ingameName}** 🎾\n\n` +
 		  `🌍 **${nationality}** — ${PLAYSTYLE_EMOJI[playstyle] ?? ''} ${playstyle}\n` +
 		  `💰 Solde de départ : **500 🪙**\n\n` +
@@ -893,23 +894,24 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 	  // ── /link ─────────────────────────────────────────────────────────────────────
 	  if (cmd === 'link') {
+		await interaction.deferReply({ ephemeral: true });
 		const player = await db.get(interaction.user.id);
 		if (!player)
-		  return interaction.reply({ embeds: [err('Crée d\'abord ton profil avec `/inscription`.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Crée d\'abord ton profil avec `/inscription`.')] });
 
 		if (!seasonDbReady)
-		  return interaction.reply({ embeds: [err('Save.db non disponible. Vérifie la configuration Supabase.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Save.db non disponible. Vérifie la configuration Supabase.')] });
 
 		const query   = interaction.options.getString('nom').trim();
 		const results = searchTmPlayers(query);
 
 		if (!results.length)
-		  return interaction.reply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"** dans le save.db.`)], ephemeral: true });
+		  return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"** dans le save.db.`)] });
 
 		if (results.length === 1) {
 		  const tm = results[0];
 		  await db.linkTm(interaction.user.id, tm.Id);
-		  return interaction.reply({ embeds: [ok('Joueur lié !',
+		  return interaction.editReply({ embeds: [ok('Joueur lié !',
 			`**${player.ingame_name}** est maintenant lié à **${tm.Firstname} ${tm.Lastname}** (${tm.Country}).\n\nUtilise \`/profil\` pour voir tes stats complets !`
 		  )]});
 		}
@@ -917,103 +919,107 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		const lines = results.map((tm, i) =>
 		  `\`${i + 1}.\` **${tm.Firstname} ${tm.Lastname}** (${tm.Country}) — ID \`${tm.Id}\``
 		).join('\n');
-		return interaction.reply({ embeds: [
+		return interaction.editReply({ embeds: [
 		  new EmbedBuilder().setColor(COLOR.blue)
 			.setTitle('🔍 Plusieurs joueurs trouvés')
 			.setDescription(`${lines}\n\nRefais \`/link\` avec le prénom + nom complet pour préciser.`)
-		], ephemeral: true });
+		] });
 	  }
 
 	  // ── /profil ───────────────────────────────────────────────────────────────────
 	  if (cmd === 'profil') {
+		await interaction.deferReply();
 		const target = interaction.options.getUser('joueur') ?? interaction.user;
 		const player = await db.get(target.id);
 
 		if (!player) {
-		  return interaction.reply({ embeds: [err(
+		  return interaction.editReply({ embeds: [err(
 			target.id === interaction.user.id
 			  ? 'Pas encore de joueur. Utilise `/inscription` !'
 			  : `**${target.username}** n'a pas de joueur.`
-		  )], ephemeral: true });
+		  )] });
 		}
 
 		const tmData = player.tm_player_id ? getTmPlayerData(player.tm_player_id) : null;
-		return interaction.reply({
+		return interaction.editReply({
 		  embeds: [buildProfileEmbed(player, tmData, target.displayAvatarURL({ dynamic: true }))]
 		});
 	  }
 
 	  // ── /attributs ────────────────────────────────────────────────────────────────
 	  if (cmd === 'attributs') {
+		await interaction.deferReply();
 		const target = interaction.options.getUser('joueur') ?? interaction.user;
 		const player = await db.get(target.id);
 
 		if (!player)
-		  return interaction.reply({ embeds: [err(target.id === interaction.user.id ? 'Pas encore de joueur. Utilise `/inscription` !' : `**${target.username}** n'a pas de joueur.`)], ephemeral: true });
+		  return interaction.editReply({ embeds: [err(target.id === interaction.user.id ? 'Pas encore de joueur. Utilise `/inscription` !' : `**${target.username}** n'a pas de joueur.`)] });
 
 		if (!player.tm_player_id)
-		  return interaction.reply({ embeds: [err('Aucun joueur TM2026 lié. Utilise `/link` d\'abord.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Aucun joueur TM2026 lié. Utilise `/link` d\'abord.')] });
 
 		if (!seasonDbReady)
-		  return interaction.reply({ embeds: [err('Save.db en cours de chargement, réessaie dans quelques secondes.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Save.db en cours de chargement, réessaie dans quelques secondes.')] });
 
 		const s = openSaveDb();
-		if (!s) return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		if (!s) return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
 		let p;
 		try { p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(player.tm_player_id); }
 		finally { s.close(); }
 
-		if (!p) return interaction.reply({ embeds: [err('Joueur TM introuvable dans le save.db.')], ephemeral: true });
+		if (!p) return interaction.editReply({ embeds: [err('Joueur TM introuvable dans le save.db.')] });
 
-		return interaction.reply({
+		return interaction.editReply({
 		  embeds: [buildAttributesEmbed(player, p, target.displayAvatarURL({ dynamic: true }))]
 		});
 	  }
 
 	  // ── /coins ────────────────────────────────────────────────────────────────────
 	  if (cmd === 'coins') {
+		await interaction.deferReply({ ephemeral: true });
 		const player = await db.get(interaction.user.id);
 		if (!player)
-		  return interaction.reply({ embeds: [err('Pas encore de joueur. Utilise `/inscription` !')], ephemeral: true });
-		return interaction.reply({
+		  return interaction.editReply({ embeds: [err('Pas encore de joueur. Utilise `/inscription` !')] });
+		return interaction.editReply({
 		  embeds: [buildWalletEmbed(player, await db.txHistory(interaction.user.id))],
-		  ephemeral: true,
 		});
 	  }
 
 	  // ── /stats ───────────────────────────────────────────────────────────────────
 	  if (cmd === 'stats') {
+		await interaction.deferReply();
 		if (!seasonDbReady)
-		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
 		const query = interaction.options.getString('nom').trim();
 		const results = getTmPlayerByName(query);
 
 		if (!results.length)
-		  return interaction.reply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)], ephemeral: true });
+		  return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)] });
 
 		if (results.length > 1) {
 		  const lines = results.map((r, i) =>
 			`\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
 		  ).join('\n');
-		  return interaction.reply({ embeds: [
+		  return interaction.editReply({ embeds: [
 			new EmbedBuilder().setColor(COLOR.blue)
 			  .setTitle('🔍 Plusieurs joueurs trouvés')
 			  .setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
-		  ], ephemeral: true });
+		  ] });
 		}
 
 		const tm = getTmPlayerData(results[0].Id);
-		if (!tm) return interaction.reply({ embeds: [err('Impossible de lire les stats de ce joueur.')], ephemeral: true });
+		if (!tm) return interaction.editReply({ embeds: [err('Impossible de lire les stats de ce joueur.')] });
 
-		return interaction.reply({ embeds: [buildPublicStatsEmbed(tm)] });
+		return interaction.editReply({ embeds: [buildPublicStatsEmbed(tm)] });
 	  }
 
 	  // ── /h2h ─────────────────────────────────────────────────────────────────────
 	  if (cmd === 'h2h') {
+		await interaction.deferReply();
 		if (!seasonDbReady)
-		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
 		const q1 = interaction.options.getString('joueur1').trim();
 		const q2 = interaction.options.getString('joueur2').trim();
@@ -1021,59 +1027,61 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 		const r1 = getTmPlayerByName(q1);
 		const r2 = getTmPlayerByName(q2);
 
-		if (!r1.length) return interaction.reply({ embeds: [err(`Joueur **"${q1}"** introuvable.`)], ephemeral: true });
-		if (!r2.length) return interaction.reply({ embeds: [err(`Joueur **"${q2}"** introuvable.`)], ephemeral: true });
+		if (!r1.length) return interaction.editReply({ embeds: [err(`Joueur **"${q1}"** introuvable.`)] });
+		if (!r2.length) return interaction.editReply({ embeds: [err(`Joueur **"${q2}"** introuvable.`)] });
 
 		if (r1.length > 1)
-		  return interaction.reply({ embeds: [err(`Plusieurs joueurs pour "${q1}" — précise le nom complet.`)], ephemeral: true });
+		  return interaction.editReply({ embeds: [err(`Plusieurs joueurs pour "${q1}" — précise le nom complet.`)] });
 		if (r2.length > 1)
-		  return interaction.reply({ embeds: [err(`Plusieurs joueurs pour "${q2}" — précise le nom complet.`)], ephemeral: true });
+		  return interaction.editReply({ embeds: [err(`Plusieurs joueurs pour "${q2}" — précise le nom complet.`)] });
 
 		const p1 = r1[0], p2 = r2[0];
 		if (p1.Id === p2.Id)
-		  return interaction.reply({ embeds: [err('Les deux joueurs sont identiques.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Les deux joueurs sont identiques.')] });
 
 		const h2h = getH2H(p1.Id, p2.Id);
-		if (!h2h) return interaction.reply({ embeds: [err('Impossible de calculer le H2H.')], ephemeral: true });
+		if (!h2h) return interaction.editReply({ embeds: [err('Impossible de calculer le H2H.')] });
 
-		return interaction.reply({ embeds: [buildH2HEmbed(p1, p2, h2h)] });
+		return interaction.editReply({ embeds: [buildH2HEmbed(p1, p2, h2h)] });
 	  }
 
 	  // ── /palmares ────────────────────────────────────────────────────────────────
 	  if (cmd === 'palmares') {
+		await interaction.deferReply();
 		if (!seasonDbReady)
-		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
 		const query = interaction.options.getString('nom').trim();
 		const results = getTmPlayerByName(query);
 
 		if (!results.length)
-		  return interaction.reply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)], ephemeral: true });
+		  return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)] });
 
 		if (results.length > 1) {
 		  const lines = results.map((r, i) =>
 			`\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
 		  ).join('\n');
-		  return interaction.reply({ embeds: [
+		  return interaction.editReply({ embeds: [
 			new EmbedBuilder().setColor(COLOR.blue)
 			  .setTitle('🔍 Plusieurs joueurs trouvés')
 			  .setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
-		  ], ephemeral: true });
+		  ] });
 		}
 
 		const palmares = getTmPalmares(results[0].Id);
-		if (!palmares) return interaction.reply({ embeds: [err('Impossible de lire le palmarès.')], ephemeral: true });
+		if (!palmares) return interaction.editReply({ embeds: [err('Impossible de lire le palmarès.')] });
 
-		return interaction.reply({ embeds: [buildPalmaresEmbed(results[0], palmares)] });
+		return interaction.editReply({ embeds: [buildPalmaresEmbed(results[0], palmares)] });
 	  }
 
 	  // ── /classement ──────────────────────────────────────────────────────────────
 	  if (cmd === 'classement') {
+		await interaction.deferReply();
 		if (!seasonDbReady)
-		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
 		const rows = getTmClassement(20);
-		return interaction.reply({ embeds: [buildClassementEmbed(rows)] });
+		return interaction.editReply({ embeds: [buildClassementEmbed(rows)] });
 	  }
 
 	  // ── /admin ────────────────────────────────────────────────────────────────────
