@@ -45,7 +45,33 @@
 	);
 
 	// ─── Serveur HTTP (Render Web Service) ───────────────────────────────────────
-http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
+const PORT = process.env.PORT || 3000;
+const httpServer = http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain' });
+  res.end('🎾 Tennis Bot — OK');
+});
+httpServer.listen(PORT, () => {
+  console.log(`[HTTP] Serveur keep-alive lancé sur le port ${PORT}`);
+});
+
+// ─── Keep-alive (évite le sleep Render sur Web Service) ──────────────────────
+// Render endort les Web Services gratuits après 15 min d'inactivité.
+// Ce ping toutes les 10 min maintient le service éveillé.
+const RENDER_URL = process.env.RENDER_EXTERNAL_URL; // injecté automatiquement par Render
+function keepAlive() {
+  if (!RENDER_URL) {
+    console.log('[Keep-alive] RENDER_EXTERNAL_URL non défini — ping désactivé');
+    return;
+  }
+  const url = RENDER_URL.startsWith('https') ? RENDER_URL : `https://${RENDER_URL}`;
+  const lib = url.startsWith('https') ? https : http;
+  lib.get(url, (res) => {
+    console.log(`[Keep-alive] Ping → ${url} — HTTP ${res.statusCode}`);
+  }).on('error', (e) => {
+    console.warn(`[Keep-alive] Erreur ping : ${e.message}`);
+  });
+}
+setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 // ─── Chemins ──────────────────────────────────────────────────────────────────
 	const TMP_DIR        = path.join('/tmp', 'tennis-bot');
@@ -101,6 +127,18 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 
 	// Télécharge le save.db au démarrage (non-bloquant)
 	let seasonDbReady = false;
+	console.log('[Boot] ═══════════════════════════════════════════════');
+	console.log('[Boot] 🎾 Tennis Manager 2026 — démarrage...');
+	console.log(`[Boot] DISCORD_TOKEN  : ${process.env.DISCORD_TOKEN  ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] CLIENT_ID      : ${process.env.CLIENT_ID      ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] GUILD_ID       : ${process.env.GUILD_ID       ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] SUPABASE_URL   : ${process.env.SUPABASE_URL   ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] SUPABASE_KEY   : ${process.env.SUPABASE_KEY   ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] SUPABASE_BUCKET: ${process.env.SUPABASE_BUCKET ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] SUPABASE_FILE  : ${process.env.SUPABASE_FILE  ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] RENDER_EXTERNAL_URL: ${process.env.RENDER_EXTERNAL_URL ?? '⚠️  non défini (keep-alive désactivé)'}`);
+	console.log('[Boot] ═══════════════════════════════════════════════');
+	console.log('[Boot] Téléchargement du save.db depuis Supabase...');
 	supabaseDownload()
 	  .then(() => {
 		seasonDbReady = true;
@@ -1162,26 +1200,60 @@ http.createServer((req, res) => res.end('OK')).listen(process.env.PORT || 3000);
 	  console.log('✅ Commandes déployées !');
 	}
 
-	if (process.argv.includes('--deploy')) {
-	  deployCommands().catch(console.error);
-	} else {
+	// ── Démarrage du client Discord ──────────────────────────────────────────────
+	// Si --deploy est passé en argument, on déploie les commandes PUIS on démarre
+	// le bot (comportement Render : la Start Command est toujours "node index.js").
+	// Pour un deploy one-shot depuis ta machine : node index.js --deploy --exit
+	async function startBot() {
+	  if (process.argv.includes('--deploy')) {
+		console.log('[Boot] Mode --deploy détecté : déploiement des commandes slash...');
+		await deployCommands().catch((e) => {
+		  console.error('[Deploy] Erreur lors du déploiement :', e);
+		});
+		// Si --exit est aussi passé (usage local), on s'arrête là
+		if (process.argv.includes('--exit')) {
+		  console.log('[Boot] --exit détecté — arrêt après deploy.');
+		  process.exit(0);
+		}
+		console.log('[Boot] Commandes déployées — démarrage du bot...');
+	  }
+
+	  if (!process.env.DISCORD_TOKEN) {
+		console.error('[Boot] ❌ DISCORD_TOKEN manquant — impossible de démarrer le bot.');
+		process.exit(1);
+	  }
+
 	  const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 	  client.once('ready', () => {
-		console.log(`🎾 Bot connecté : ${client.user.tag}`);
+		console.log(`[Discord] ✅ Bot connecté : ${client.user.tag} (ID: ${client.user.id})`);
+		console.log(`[Discord] Serveurs : ${client.guilds.cache.size}`);
+		// Premier keep-alive immédiat
+		keepAlive();
 	  });
+
+	  client.on('disconnect', () => console.warn('[Discord] ⚠️  Déconnecté !'));
+	  client.on('error',      (e) => console.error('[Discord] Erreur client :', e));
+	  client.on('warn',       (w) => console.warn('[Discord] Avertissement :', w));
 
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isChatInputCommand()) return;
+		console.log(`[Cmd] /${interaction.commandName} par ${interaction.user.tag} (${interaction.user.id})`);
 		try {
 		  await handleCommand(interaction);
 		} catch (e) {
-		  console.error(`Erreur /${interaction.commandName}:`, e);
+		  console.error(`[Cmd] Erreur /${interaction.commandName}:`, e);
 		  const msg = { content: '❌ Une erreur est survenue.', ephemeral: true };
 		  if (interaction.replied || interaction.deferred) interaction.followUp(msg);
 		  else interaction.reply(msg);
 		}
 	  });
 
-	  client.login(process.env.DISCORD_TOKEN);
+	  console.log('[Discord] Connexion en cours...');
+	  client.login(process.env.DISCORD_TOKEN).catch((e) => {
+		console.error('[Discord] ❌ Échec du login :', e.message);
+		process.exit(1);
+	  });
 	}
+
+	startBot();
