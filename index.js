@@ -458,7 +458,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  if (!s) return [];
 	  try {
 		return s.prepare(`
-		  SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country, tp.Age,
+		  SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country,
 		    r.Rank, r.Points
 		  FROM TennisPlayer tp
 		  JOIN Ranking r ON r.PlayerId = tp.Id
@@ -636,10 +636,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const embed = new EmbedBuilder()
 		.setColor(COLOR.purple)
 		.setTitle(`📋 Attributs — ${p.Firstname} ${p.Lastname}`)
-		.setDescription(`Profil Discord : **${player.ingame_name}** | Potentiel : **${(p.Potential ?? 0).toFixed(1)}/20**`)
-		.setThumbnail(avatarUrl)
+		.setDescription(`${player.ingame_name ? `Profil : **${player.ingame_name}** | ` : ''}Potentiel : **${(p.Potential ?? 0).toFixed(1)}/20**`)
 		.setFooter({ text: 'Tennis Manager 2026 — Attributs' })
 		.setTimestamp();
+
+	  if (avatarUrl) embed.setThumbnail(avatarUrl);
 
 	  // Calcul de la moyenne globale
 	  const allAttrs = Object.values(ATTR_GROUPS).flat().map(([key]) => p[key] ?? 0);
@@ -845,12 +846,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  new SlashCommandBuilder()
 		.setName('profil')
 		.setDescription('Voir le profil complet et les stats d\'un joueur')
-		.addUserOption(o => o.setName('joueur').setDescription('Joueur à consulter (toi par défaut)').setRequired(false)),
+		.addUserOption(o => o.setName('joueur').setDescription('Joueur Discord à consulter (toi par défaut)').setRequired(false))
+		.addStringOption(o => o.setName('nom').setDescription('Ou chercher par nom TM2026 (ex: Federer)').setRequired(false)),
 
 	  new SlashCommandBuilder()
 		.setName('attributs')
 		.setDescription('Voir tous les attributs TM2026 d\'un joueur')
-		.addUserOption(o => o.setName('joueur').setDescription('Joueur à consulter (toi par défaut)').setRequired(false)),
+		.addUserOption(o => o.setName('joueur').setDescription('Joueur Discord à consulter (toi par défaut)').setRequired(false))
+		.addStringOption(o => o.setName('nom').setDescription('Ou chercher par nom TM2026 (ex: Federer)').setRequired(false)),
 
 	  new SlashCommandBuilder()
 		.setName('coins')
@@ -967,6 +970,63 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── /profil ───────────────────────────────────────────────────────────────────
 	  if (cmd === 'profil') {
 		await interaction.deferReply();
+
+		const nomQuery = interaction.options.getString('nom');
+
+		// Mode recherche par nom TM (sans compte Discord)
+		if (nomQuery) {
+		  if (!seasonDbReady)
+			return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+		  const results = getTmPlayerByName(nomQuery.trim());
+		  if (!results.length)
+			return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${nomQuery}"** dans le save.db.`)] });
+		  if (results.length > 1) {
+			const lines = results.map((r, i) =>
+			  `\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+			).join('\n');
+			return interaction.editReply({ embeds: [
+			  new EmbedBuilder().setColor(COLOR.blue)
+				.setTitle('🔍 Plusieurs joueurs trouvés')
+				.setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
+			] });
+		  }
+		  const tm = getTmPlayerData(results[0].Id);
+		  if (!tm) return interaction.editReply({ embeds: [err('Impossible de lire les stats de ce joueur.')] });
+		  // Embed sans profil Discord
+		  const p = tm.p;
+		  const embedTm = new EmbedBuilder()
+			.setColor(COLOR.tennis)
+			.setTitle(`🎾 ${p.Firstname} ${p.Lastname} (${p.Country ?? '—'})`)
+			.setDescription(`${HAND_LABEL[p.Handedness] ?? '—'} — ${BH_LABEL[p.BackhandStyle] ?? '—'}`)
+			.setFooter({ text: 'Tennis Manager 2026 — Profil TM' })
+			.setTimestamp();
+		  embedTm.addFields(
+			{ name: '📈 Rang ATP',   value: tm.rank.Rank != null ? `**#${tm.rank.Rank}**` : '—', inline: true },
+			{ name: '🔢 Points',     value: tm.rank.Points != null ? `${tm.rank.Points}` : '—',  inline: true },
+			{ name: '🏆 Titres',     value: `**${tm.titles}**`,                                   inline: true },
+			{ name: '🥈 Finales',    value: `**${tm.finals}**`,                                   inline: true },
+			{ name: '📊 Bilan',      value: tm.stats.played ? `**${tm.stats.won}V** / ${tm.stats.played - tm.stats.won}D (${pct(tm.stats.won, tm.stats.played)})` : '—', inline: true },
+			{ name: '💵 Prize money',value: moneyFmt(tm.totalMoney),                              inline: true },
+			{ name: '⭐ Potentiel',  value: `${(p.Potential ?? 0).toFixed(1)}/20`,               inline: true },
+			{ name: '💪 Condition',  value: `${p.PhysicalCondition ?? '—'}/100`,                 inline: true },
+			{ name: '❤️ Moral',      value: `${p.Morale ?? '—'}/100`,                            inline: true },
+		  );
+		  if (tm.surfStats.length) {
+			const lines = tm.surfStats.map(s =>
+			  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
+			).join('\n');
+			embedTm.addFields({ name: '🌍 Bilan par surface', value: lines });
+		  }
+		  if (tm.lastResults.length) {
+			const lines = tm.lastResults.map(r =>
+			  `${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+			).join('\n');
+			embedTm.addFields({ name: '📋 Derniers résultats', value: lines });
+		  }
+		  return interaction.editReply({ embeds: [embedTm] });
+		}
+
+		// Mode Discord : joueur mentionné ou soi-même
 		const target = interaction.options.getUser('joueur') ?? interaction.user;
 		const player = await db.get(target.id);
 
@@ -987,6 +1047,40 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── /attributs ────────────────────────────────────────────────────────────────
 	  if (cmd === 'attributs') {
 		await interaction.deferReply();
+
+		const nomQuery = interaction.options.getString('nom');
+
+		// Mode recherche par nom TM (sans compte Discord)
+		if (nomQuery) {
+		  if (!seasonDbReady)
+			return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+		  const results = getTmPlayerByName(nomQuery.trim());
+		  if (!results.length)
+			return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${nomQuery}"** dans le save.db.`)] });
+		  if (results.length > 1) {
+			const lines = results.map((r, i) =>
+			  `\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+			).join('\n');
+			return interaction.editReply({ embeds: [
+			  new EmbedBuilder().setColor(COLOR.blue)
+				.setTitle('🔍 Plusieurs joueurs trouvés')
+				.setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
+			] });
+		  }
+		  const s = openSaveDb();
+		  if (!s) return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+		  let tmPlayer;
+		  try { tmPlayer = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(results[0].Id); }
+		  finally { s.close(); }
+		  if (!tmPlayer) return interaction.editReply({ embeds: [err('Joueur introuvable dans le save.db.')] });
+		  // Faux profil Discord minimal pour réutiliser buildAttributesEmbed
+		  const fakeProfile = { ingame_name: `${tmPlayer.Firstname} ${tmPlayer.Lastname}` };
+		  return interaction.editReply({
+			embeds: [buildAttributesEmbed(fakeProfile, tmPlayer, null)]
+		  });
+		}
+
+		// Mode Discord
 		const target = interaction.options.getUser('joueur') ?? interaction.user;
 		const player = await db.get(target.id);
 
