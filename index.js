@@ -1353,6 +1353,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  client.on('warn',       (w) => console.warn('[Discord] Avertissement :', w));
 
 	  // ══════════════════════════════════════════════════════════════════════════════
+	  //  SESSION STORE : données de création de joueur (évite les customId trop longs)
+	  // ══════════════════════════════════════════════════════════════════════════════
+	  const cjSessions = new Map(); // userId → { n, p, s, t1, t2 }
+
+	  // ══════════════════════════════════════════════════════════════════════════════
 	  //  ÉTAPES CREER-JOUEUR : modal submit + select menus personnalité
 	  // ══════════════════════════════════════════════════════════════════════════════
 
@@ -1371,11 +1376,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (await db.nameTaken(ingameName))
 		  return interaction.reply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)], ephemeral: true });
 
-		// Encode identité dans le customId pour la passer aux étapes suivantes
-		const encodedId = Buffer.from(JSON.stringify({ n: ingameName, p: nationality })).toString('base64url');
+		// Stocker les données en session mémoire, customId = userId seulement
+		cjSessions.set(interaction.user.id, { n: ingameName, p: nationality });
 
 		const styleSelect = new StringSelectMenuBuilder()
-		  .setCustomId(`cj_style:${encodedId}`)
+		  .setCustomId(`cj_style:${interaction.user.id}`)
 		  .setPlaceholder('Choisis ton style de jeu')
 		  .addOptions(
 			{ label: '⚡ Attaquant de fond',  value: 'Attaquant de fond',  description: 'Frappe fort depuis le fond' },
@@ -1399,14 +1404,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!interaction.isStringSelectMenu()) return;
 		if (!interaction.customId.startsWith('cj_style:')) return;
 
-		const encodedId = interaction.customId.split(':')[1];
-		const { n: ingameName, p: nationality } = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const userId = interaction.customId.split(':')[1];
+		const sess3 = cjSessions.get(userId) ?? cjSessions.get(interaction.user.id);
+		if (!sess3) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
 		const playstyle = interaction.values[0];
-
-		const encodedId2 = Buffer.from(JSON.stringify({ n: ingameName, p: nationality, s: playstyle })).toString('base64url');
+		cjSessions.set(interaction.user.id, { ...sess3, s: playstyle });
 
 		const trait1Select = new StringSelectMenuBuilder()
-		  .setCustomId(`cj_t1:${encodedId2}`)
+		  .setCustomId(`cj_t1:${interaction.user.id}`)
 		  .setPlaceholder('1er trait de personnalité')
 		  .addOptions(
 			{ label: '🎲 Opportuniste', value: 'Opportuniste', description: 'Saisit chaque occasion' },
@@ -1429,14 +1434,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!interaction.isStringSelectMenu()) return;
 		if (!interaction.customId.startsWith('cj_t1:')) return;
 
-		const encodedId = interaction.customId.split(':')[1];
-		const prev = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const userId4 = interaction.customId.split(':')[1];
+		const sess4 = cjSessions.get(userId4) ?? cjSessions.get(interaction.user.id);
+		if (!sess4) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
 		const trait1 = interaction.values[0];
-
-		const encodedId2 = Buffer.from(JSON.stringify({ ...prev, t1: trait1 })).toString('base64url');
+		cjSessions.set(interaction.user.id, { ...sess4, t1: trait1 });
 
 		const trait2Select = new StringSelectMenuBuilder()
-		  .setCustomId(`cj_t2:${encodedId2}`)
+		  .setCustomId(`cj_t2:${interaction.user.id}`)
 		  .setPlaceholder('2e trait de personnalité')
 		  .addOptions(
 			{ label: '💙 Sensible',     value: 'Sensible',     description: 'Émotif, ressent fortement la pression' },
@@ -1450,7 +1455,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
 			.setTitle('🎾 Créer ton joueur — Personnalité (2/3)')
 			.setDescription(
-			  `**${prev.n}** · 🌍 ${prev.p} · ${PLAYSTYLE_EMOJI[prev.s] ?? ''} ${prev.s}\n\n` +
+			  `**${sess4.n}** · 🌍 ${sess4.p} · ${PLAYSTYLE_EMOJI[sess4.s] ?? ''} ${sess4.s}\n\n` +
 			  `✅ Trait 1 : **${trait1}**\n\n**2e trait de personnalité**`
 			)],
 		  components: [new ActionRowBuilder().addComponents(trait2Select)],
@@ -1462,14 +1467,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!interaction.isStringSelectMenu()) return;
 		if (!interaction.customId.startsWith('cj_t2:')) return;
 
-		const encodedId = interaction.customId.split(':')[1];
-		const prev = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const userId5 = interaction.customId.split(':')[1];
+		const sess5 = cjSessions.get(userId5) ?? cjSessions.get(interaction.user.id);
+		if (!sess5) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
 		const trait2 = interaction.values[0];
-
-		const encodedId2 = Buffer.from(JSON.stringify({ ...prev, t2: trait2 })).toString('base64url');
+		cjSessions.set(interaction.user.id, { ...sess5, t2: trait2 });
 
 		const trait3Select = new StringSelectMenuBuilder()
-		  .setCustomId(`cj_t3:${encodedId2}`)
+		  .setCustomId(`cj_t3:${interaction.user.id}`)
 		  .setPlaceholder('3e trait de personnalité')
 		  .addOptions(
 			{ label: '🎙️ Charismatique', value: 'Charismatique', description: 'Fédérateur, charisme naturel' },
@@ -1483,8 +1488,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
 			.setTitle('🎾 Créer ton joueur — Personnalité (3/3)')
 			.setDescription(
-			  `**${prev.n}** · 🌍 ${prev.p} · ${PLAYSTYLE_EMOJI[prev.s] ?? ''} ${prev.s}\n\n` +
-			  `✅ Trait 1 : **${prev.t1}**\n✅ Trait 2 : **${trait2}**\n\n**3e trait de personnalité**`
+			  `**${sess5.n}** · 🌍 ${sess5.p} · ${PLAYSTYLE_EMOJI[sess5.s] ?? ''} ${sess5.s}\n\n` +
+			  `✅ Trait 1 : **${sess5.t1}**\n✅ Trait 2 : **${trait2}**\n\n**3e trait de personnalité**`
 			)],
 		  components: [new ActionRowBuilder().addComponents(trait3Select)],
 		});
@@ -1495,9 +1500,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!interaction.isStringSelectMenu()) return;
 		if (!interaction.customId.startsWith('cj_t3:')) return;
 
-		const encodedId = interaction.customId.split(':')[1];
-		const prev = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const userId6 = interaction.customId.split(':')[1];
+		const prev = cjSessions.get(userId6) ?? cjSessions.get(interaction.user.id);
+		if (!prev) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
 		const trait3 = interaction.values[0];
+		cjSessions.delete(interaction.user.id);
 
 		// Vérifications finales
 		if (await db.exists(interaction.user.id)) {
