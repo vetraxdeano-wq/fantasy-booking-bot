@@ -34,6 +34,7 @@
 	const {
 	  Client, GatewayIntentBits, REST, Routes,
 	  SlashCommandBuilder, EmbedBuilder, PermissionFlagsBits,
+	  ActionRowBuilder, StringSelectMenuBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, ButtonBuilder, ButtonStyle,
 	} = require('discord.js');
 	const Database = require('better-sqlite3');
 	const { createClient } = require('@supabase/supabase-js');
@@ -158,6 +159,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	//  Tables requises dans Supabase :
 	//    players(discord_id text PK, username text, ingame_name text,
 	//            nationality text, playstyle text, tm_player_id int8,
+	//            trait1 text, trait2 text, trait3 text,
 	//            coins int8 default 500, created_at timestamptz default now())
 	//    transactions(id bigserial PK, discord_id text, amount int8,
 	//                 reason text, created_at timestamptz default now())
@@ -180,7 +182,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		await supabase.from('players').insert({
 		  discord_id: p.discordId, username: p.username, ingame_name: p.ingameName,
 		  nationality: p.nationality, playstyle: p.playstyle, coins: 500,
+		  trait1: p.trait1 ?? null, trait2: p.trait2 ?? null, trait3: p.trait3 ?? null,
 		});
+	  },
+	  delete: async (id) => {
+		await supabase.from('transactions').delete().eq('discord_id', id);
+		await supabase.from('players').delete().eq('discord_id', id);
 	  },
 	  linkTm: async (id, tmId) => {
 		await supabase.from('players').update({ tm_player_id: tmId }).eq('discord_id', id);
@@ -824,19 +831,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	// ══════════════════════════════════════════════════════════════════════════════
 	const COMMANDS_DATA = [
 
+	new SlashCommandBuilder()
+		.setName('creer-joueur')
+		.setDescription('Crée ton joueur dans la simulation TM2026 (un seul par compte Discord)'),
+
 	  new SlashCommandBuilder()
-		.setName('inscription')
-		.setDescription('Crée ton joueur dans la simulation TM2026')
-		.addStringOption(o => o.setName('nom').setDescription('Nom de ton joueur').setRequired(true))
-		.addStringOption(o => o.setName('nationalite').setDescription('Nationalité (ex: France)').setRequired(true))
-		.addStringOption(o => o.setName('style').setDescription('Style de jeu').setRequired(true)
-		  .addChoices(
-			{ name: '⚡ Attaquant de fond',  value: 'Attaquant de fond'  },
-			{ name: '🛡️ Défenseur de fond', value: 'Défenseur de fond'  },
-			{ name: '🏹 Serveur-Volleyeur',  value: 'Serveur-Volleyeur'  },
-			{ name: '🔥 Monteur au filet',   value: 'Monteur au filet'   },
-			{ name: '🎯 Tout-terrain',       value: 'Tout-terrain'       },
-		  )),
+		.setName('supprimer-joueur')
+		.setDescription('(Admin) Supprimer le joueur d\'un utilisateur pour les tests')
+		.setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+		.addUserOption(o => o.setName('cible').setDescription('Utilisateur Discord dont supprimer le joueur').setRequired(true)),
 
 	  new SlashCommandBuilder()
 		.setName('link')
@@ -909,29 +912,48 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	async function handleCommand(interaction) {
 	  const cmd = interaction.commandName;
 
-	  // ── /inscription ─────────────────────────────────────────────────────────────
-	  if (cmd === 'inscription') {
-		await interaction.deferReply({ ephemeral: true });
+	// ── /creer-joueur ─────────────────────────────────────────────────────────────
+	//  Étape 1 : vérification existence → envoi du Modal (identité)
+	if (cmd === 'creer-joueur') {
 		if (await db.exists(interaction.user.id))
-		  return interaction.editReply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')] });
+		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
 
-		const ingameName  = interaction.options.getString('nom').trim();
-		const nationality = interaction.options.getString('nationalite').trim();
-		const playstyle   = interaction.options.getString('style');
+		const modal = new ModalBuilder()
+		  .setCustomId('creer_joueur_modal')
+		  .setTitle('🎾 Créer ton joueur — Identité');
 
-		if (ingameName.length < 2 || ingameName.length > 32)
-		  return interaction.editReply({ embeds: [err('Le nom doit faire entre 2 et 32 caractères.')] });
-		if (await db.nameTaken(ingameName))
-		  return interaction.editReply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)] });
+		modal.addComponents(
+		  new ActionRowBuilder().addComponents(
+			new TextInputBuilder()
+			  .setCustomId('cj_nom')
+			  .setLabel('Prénom Nom (pseudo in-game)')
+			  .setStyle(TextInputStyle.Short)
+			  .setMinLength(2).setMaxLength(32)
+			  .setPlaceholder('ex: Rafael Nadal')
+			  .setRequired(true)
+		  ),
+		  new ActionRowBuilder().addComponents(
+			new TextInputBuilder()
+			  .setCustomId('cj_pays')
+			  .setLabel('Nationalité (pays)')
+			  .setStyle(TextInputStyle.Short)
+			  .setMinLength(2).setMaxLength(50)
+			  .setPlaceholder('ex: France')
+			  .setRequired(true)
+		  ),
+		);
 
-		await db.create({ discordId: interaction.user.id, username: interaction.user.username, ingameName, nationality, playstyle });
-		return interaction.editReply({ embeds: [ok('Joueur créé !',
-		  `Bienvenue **${ingameName}** 🎾\n\n` +
-		  `🌍 **${nationality}** — ${PLAYSTYLE_EMOJI[playstyle] ?? ''} ${playstyle}\n` +
-		  `💰 Solde de départ : **500 🪙**\n\n` +
-		  `Utilise \`/link <nom>\` pour associer ton joueur TM2026 et afficher tes vraies stats !`
-		)]});
-	  }
+		return interaction.showModal(modal);
+	}
+
+	// ── /supprimer-joueur ─────────────────────────────────────────────────────────
+	if (cmd === 'supprimer-joueur') {
+		const target = interaction.options.getUser('cible');
+		if (!await db.exists(target.id))
+		  return interaction.reply({ embeds: [err(`**${target.username}** n'a pas de joueur.`)], ephemeral: true });
+		await db.delete(target.id);
+		return interaction.reply({ embeds: [ok('Joueur supprimé', `Le joueur de <@${target.id}> a été supprimé.\nIl peut relancer \`/creer-joueur\`.`)], ephemeral: true });
+	}
 
 	  // ── /link ─────────────────────────────────────────────────────────────────────
 	  if (cmd === 'link') {
@@ -1330,6 +1352,187 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  client.on('error',      (e) => console.error('[Discord] Erreur client :', e));
 	  client.on('warn',       (w) => console.warn('[Discord] Avertissement :', w));
 
+	  // ══════════════════════════════════════════════════════════════════════════════
+	  //  ÉTAPES CREER-JOUEUR : modal submit + select menus personnalité
+	  // ══════════════════════════════════════════════════════════════════════════════
+
+	  // Étape 2 : modal soumis → afficher sélecteur style de jeu
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (interaction.customId !== 'creer_joueur_modal') return;
+
+		const ingameName  = interaction.fields.getTextInputValue('cj_nom').trim();
+		const nationality = interaction.fields.getTextInputValue('cj_pays').trim();
+
+		if (ingameName.length < 2 || ingameName.length > 32)
+		  return interaction.reply({ embeds: [err('Le nom doit faire entre 2 et 32 caractères.')], ephemeral: true });
+		if (await db.exists(interaction.user.id))
+		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
+		if (await db.nameTaken(ingameName))
+		  return interaction.reply({ embeds: [err(`Le nom **${ingameName}** est déjà pris.`)], ephemeral: true });
+
+		// Encode identité dans le customId pour la passer aux étapes suivantes
+		const encodedId = Buffer.from(JSON.stringify({ n: ingameName, p: nationality })).toString('base64url');
+
+		const styleSelect = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_style:${encodedId}`)
+		  .setPlaceholder('Choisis ton style de jeu')
+		  .addOptions(
+			{ label: '⚡ Attaquant de fond',  value: 'Attaquant de fond',  description: 'Frappe fort depuis le fond' },
+			{ label: '🛡️ Défenseur de fond', value: 'Défenseur de fond',  description: 'Solidité et régularité' },
+			{ label: '🏹 Serveur-Volleyeur',  value: 'Serveur-Volleyeur',  description: 'Service + montée au filet' },
+			{ label: '🔥 Monteur au filet',   value: 'Monteur au filet',   description: 'Agressif au filet' },
+			{ label: '🎯 Tout-terrain',       value: 'Tout-terrain',       description: 'Polyvalent sur toutes surfaces' },
+		  );
+
+		return interaction.reply({
+		  ephemeral: true,
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Style de jeu')
+			.setDescription(`**${ingameName}** · 🌍 ${nationality}\n\nChoisis ton style de jeu :`)],
+		  components: [new ActionRowBuilder().addComponents(styleSelect)],
+		});
+	  });
+
+	  // Étape 3 : style choisi → afficher sélecteur trait 1
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_style:')) return;
+
+		const encodedId = interaction.customId.split(':')[1];
+		const { n: ingameName, p: nationality } = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const playstyle = interaction.values[0];
+
+		const encodedId2 = Buffer.from(JSON.stringify({ n: ingameName, p: nationality, s: playstyle })).toString('base64url');
+
+		const trait1Select = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_t1:${encodedId2}`)
+		  .setPlaceholder('1er trait de personnalité')
+		  .addOptions(
+			{ label: '🎲 Opportuniste', value: 'Opportuniste', description: 'Saisit chaque occasion' },
+			{ label: '⚖️ Exigeant',     value: 'Exigeant',     description: 'Perfectionniste et rigoureux' },
+			{ label: '🌍 Aventurier',   value: 'Aventurier',   description: 'Aime l\'imprévu et la prise de risque' },
+			{ label: '🤝 Fidèle',       value: 'Fidèle',       description: 'Loyal, constant dans l\'effort' },
+			{ label: '🚀 Ambitieux',    value: 'Ambitieux',    description: 'Vise toujours plus haut' },
+		  );
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Personnalité (1/3)')
+			.setDescription(`**${ingameName}** · 🌍 ${nationality} · ${PLAYSTYLE_EMOJI[playstyle] ?? ''} ${playstyle}\n\n**1er trait de personnalité**`)],
+		  components: [new ActionRowBuilder().addComponents(trait1Select)],
+		});
+	  });
+
+	  // Étape 4 : trait 1 choisi → afficher sélecteur trait 2
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_t1:')) return;
+
+		const encodedId = interaction.customId.split(':')[1];
+		const prev = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const trait1 = interaction.values[0];
+
+		const encodedId2 = Buffer.from(JSON.stringify({ ...prev, t1: trait1 })).toString('base64url');
+
+		const trait2Select = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_t2:${encodedId2}`)
+		  .setPlaceholder('2e trait de personnalité')
+		  .addOptions(
+			{ label: '💙 Sensible',     value: 'Sensible',     description: 'Émotif, ressent fortement la pression' },
+			{ label: '🔥 Sanguin',      value: 'Sanguin',      description: 'Impulsif, joue avec les émotions' },
+			{ label: '💪 Déterminé',    value: 'Déterminé',    description: 'Rien ne l\'arrête' },
+			{ label: '😌 Détendu',      value: 'Détendu',      description: 'Relax, ne se laisse pas déborder' },
+			{ label: '🧘 Serein',       value: 'Serein',       description: 'Calme intérieur, mental solide' },
+		  );
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Personnalité (2/3)')
+			.setDescription(
+			  `**${prev.n}** · 🌍 ${prev.p} · ${PLAYSTYLE_EMOJI[prev.s] ?? ''} ${prev.s}\n\n` +
+			  `✅ Trait 1 : **${trait1}**\n\n**2e trait de personnalité**`
+			)],
+		  components: [new ActionRowBuilder().addComponents(trait2Select)],
+		});
+	  });
+
+	  // Étape 5 : trait 2 choisi → afficher sélecteur trait 3
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_t2:')) return;
+
+		const encodedId = interaction.customId.split(':')[1];
+		const prev = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const trait2 = interaction.values[0];
+
+		const encodedId2 = Buffer.from(JSON.stringify({ ...prev, t2: trait2 })).toString('base64url');
+
+		const trait3Select = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_t3:${encodedId2}`)
+		  .setPlaceholder('3e trait de personnalité')
+		  .addOptions(
+			{ label: '🎙️ Charismatique', value: 'Charismatique', description: 'Fédérateur, charisme naturel' },
+			{ label: '📖 Posé',          value: 'Posé',          description: 'Réfléchi, jamais dans la précipitation' },
+			{ label: '👂 Attentif',      value: 'Attentif',      description: 'À l\'écoute, lit bien le jeu adverse' },
+			{ label: '🛡️ Responsable',  value: 'Responsable',   description: 'Fiable, ne lâche jamais rien' },
+			{ label: '🏆 Compétiteur',   value: 'Compétiteur',   description: 'Vit pour gagner' },
+		  );
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Personnalité (3/3)')
+			.setDescription(
+			  `**${prev.n}** · 🌍 ${prev.p} · ${PLAYSTYLE_EMOJI[prev.s] ?? ''} ${prev.s}\n\n` +
+			  `✅ Trait 1 : **${prev.t1}**\n✅ Trait 2 : **${trait2}**\n\n**3e trait de personnalité**`
+			)],
+		  components: [new ActionRowBuilder().addComponents(trait3Select)],
+		});
+	  });
+
+	  // Étape 6 : trait 3 choisi → création du joueur en base
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_t3:')) return;
+
+		const encodedId = interaction.customId.split(':')[1];
+		const prev = JSON.parse(Buffer.from(encodedId, 'base64url').toString());
+		const trait3 = interaction.values[0];
+
+		// Vérifications finales
+		if (await db.exists(interaction.user.id)) {
+		  return interaction.update({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], components: [] });
+		}
+		if (await db.nameTaken(prev.n)) {
+		  return interaction.update({ embeds: [err(`Le nom **${prev.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], components: [] });
+		}
+
+		await db.create({
+		  discordId:  interaction.user.id,
+		  username:   interaction.user.username,
+		  ingameName: prev.n,
+		  nationality: prev.p,
+		  playstyle:  prev.s,
+		  trait1: prev.t1,
+		  trait2: prev.t2,
+		  trait3,
+		});
+
+		const traitsLine = `🧠 **${prev.t1}** · **${prev.t2}** · **${trait3}**`;
+
+		return interaction.update({
+		  embeds: [ok('Joueur créé ! 🎾',
+			`Bienvenue **${prev.n}** !\n\n` +
+			`🌍 ${prev.p}  —  ${PLAYSTYLE_EMOJI[prev.s] ?? ''} ${prev.s}\n` +
+			`${traitsLine}\n\n` +
+			`💰 Solde de départ : **500 🪙**\n\n` +
+			`Utilise \`/link <nom>\` pour associer ton joueur TM2026 et afficher tes vraies stats !`
+		  )],
+		  components: [],
+		});
+	  });
+
+	  // ── Commandes slash (existant) ────────────────────────────────────────────────
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isChatInputCommand()) return;
 		console.log(`[Cmd] /${interaction.commandName} par ${interaction.user.tag} (${interaction.user.id})`);
