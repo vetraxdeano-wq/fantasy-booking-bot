@@ -927,7 +927,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.setColor(COLOR.tennis)
 		.setTitle(`🎾 ${name} (${p.Country ?? '??'})`)
 		.setDescription(
-		  `${HAND_LABEL[p.Hand] ?? ''} — ${BH_LABEL[p.Backhand] ?? ''} | Age : **${age(p.Birthdate)}** ans\n` +
+		  `${HAND_LABEL[p.Handedness] ?? ''} — ${BH_LABEL[p.BackhandStyle] ?? ''} | Age : **${age(p.DateOfBirth)}** ans\n` +
 		  `Classement : **#${rank.Rank ?? '?'}** (${(rank.Points ?? 0).toLocaleString()} pts) | Race : **#${race.RaceRank ?? '?'}**`
 		)
 		.setFooter({ text: 'Tennis Manager 2026 — Stats publiques' })
@@ -1059,9 +1059,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  const medals = ['🥇', '🥈', '🥉'];
 	  const lines = slice.map((r) => {
-		const pos = r.Rank ?? (start + slice.indexOf(r)); // Rank est 0-indexé en DB
-		const displayPos = pos + 1;
-		const prefix = page === 0 && pos <= 2 ? medals[pos] : `#${displayPos}`;
+		const pos = r.Rank ?? (start + slice.indexOf(r) + 1); // Rank est 1-indexé en DB
+		const displayPos = pos;
+		const prefix = page === 0 && pos <= 3 ? medals[pos - 1] : `#${displayPos}`;
 		return `${prefix} **${r.Firstname} ${r.Lastname}** (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
 	  }).join('\n');
 
