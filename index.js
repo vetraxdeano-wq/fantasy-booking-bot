@@ -561,8 +561,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const s = openSaveDb();
 	  if (!s) return null;
 	  try {
-		// Cherche les matchs dans MatchResult où les deux joueurs s'affrontent
-		// Structure TM2026 : MatchResult(WinnerId, LoserId, TournamentId, Round, Date, ...)
+		// Vérifier que la table existe (saison trop récente = pas encore de matchs)
+		const tableExists = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
+		if (!tableExists) return { wins1: 0, wins2: 0, meetings: [], surfH2H: [] };
+
 		const wins1 = s.prepare(`
 		  SELECT COUNT(*) AS cnt FROM MatchResult
 		  WHERE WinnerId=? AND LoserId=?
@@ -573,19 +575,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  WHERE WinnerId=? AND LoserId=?
 		`).get(id2, id1)?.cnt ?? 0;
 
-		// Derniers matchs entre les deux
-		// Tournament.CategoryId -> TournamentCategory.Id, Type = niveau du tournoi
-		const mrTables = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
-		const meetings = mrTables ? s.prepare(`
+		const meetings = s.prepare(`
 		  SELECT mr.*, t.Name AS TournName, tc.Type AS Category
 		  FROM MatchResult mr
 		  JOIN Tournament t ON t.Id = mr.TournamentId
 		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
 		  WHERE (mr.WinnerId=? AND mr.LoserId=?) OR (mr.WinnerId=? AND mr.LoserId=?)
 		  ORDER BY mr.Date DESC LIMIT 10
-		`).all(id1, id2, id2, id1) : [];
+		`).all(id1, id2, id2, id1);
 
-		// Surface breakdown
 		const surfH2H = s.prepare(`
 		  SELECT mr.Surface, 
 		    SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS w1,
@@ -1169,9 +1167,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.setDescription('Améliorer un attribut de ton joueur TM2026 (coûte des coins)')
 		.addStringOption(o =>
 		  o.setName('stat')
-		   .setDescription('Attribut à booster')
+		   .setDescription('Attribut à booster (tape pour chercher)')
 		   .setRequired(true)
-		   .addChoices(...BOOSTABLE_STATS.map(([k,l]) => ({ name: l, value: k })))),
+		   .setAutocomplete(true)),
 
 	  new SlashCommandBuilder()
 		.setName('admin')
@@ -2650,7 +2648,20 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		});
 	  });
 
-	  	  // ── Commandes slash (existant) ────────────────────────────────────────────────
+	  	  // ── Autocomplete ──────────────────────────────────────────────────────────────
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isAutocomplete()) return;
+		if (interaction.commandName === 'boost') {
+		  const focused = interaction.options.getFocused().toLowerCase();
+		  const choices = BOOSTABLE_STATS
+			.filter(([k, l]) => l.toLowerCase().includes(focused) || k.toLowerCase().includes(focused))
+			.slice(0, 25)
+			.map(([k, l]) => ({ name: l, value: k }));
+		  await interaction.respond(choices);
+		}
+	  });
+
+	  // ── Commandes slash (existant) ────────────────────────────────────────────────
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isChatInputCommand()) return;
 		console.log(`[Cmd] /${interaction.commandName} par ${interaction.user.tag} (${interaction.user.id})`);
