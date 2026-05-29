@@ -524,7 +524,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  ['Return','Retour'],['Counter','Counter'],['Topspin','Topspin'],['Underspin','Slice'],['Dropshot','Amorti'],
 	  ['Control','Contrôle'],['Timing','Timing'],
 	  ['Speed','Vitesse'],['Footwork','Déplacement'],['Balance','Équilibre'],['Agility','Agilité'],['Fitness','Condition'],['Stamina','Endurance'],
-	  ['Anticipation','Anticipation'],['Focus','Concentration'],['Composure','Sang-froid'],['KillerInstinct','Instinct'],['FightingSpirit','Combativité'],['Tactical','Tactique'],
+	  ['Anticipation','Anticipation'],['Focus','Concentration'],['Composure','Sang-froid'],['Tactical','Tactique'],
 	  ['Volley','Volée'],
 	];
 	// Supabase helpers pour boosts
