@@ -1577,10 +1577,19 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		// On envoie un message éphémère avec un bouton intermédiaire.
 		const btnAttr1 = new ButtonBuilder()
 		  .setCustomId(`cj_open_attr1:${interaction.user.id}`)
-		  .setLabel('➡️ Renseigner les attributs (1/3)')
+		  .setLabel('➡️ Attributs techniques (1/3)')
 		  .setStyle(ButtonStyle.Primary);
 		return interaction.reply({
-		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Taille et poids enregistrés !\nClique sur le bouton ci-dessous pour saisir tes attributs techniques.')],
+		  embeds: [new EmbedBuilder()
+			.setColor(0x2ecc71)
+			.setTitle('🎾 Attributs techniques — écran 1/3')
+			.setDescription(
+			  '✅ Taille et poids enregistrés !\n\n' +
+			  '**Budget total :** 180 pts à répartir sur 3 écrans (5 stats chacun)\n' +
+			  '**Conseil :** vise environ **60 pts sur cet écran** pour garder de la marge.\n\n' +
+			  '> Chaque stat : min **1**, max **20**\n' +
+			  '> Écran 1 — Service & Coup droit'
+			)],
 		  components: [new ActionRowBuilder().addComponents(btnAttr1)],
 		  ephemeral: true,
 		});
@@ -1596,7 +1605,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		const attrModal1 = new ModalBuilder()
 		  .setCustomId(`cj_attr1:${interaction.user.id}`)
-		  .setTitle('Attributs (1/3) — 180 pts, max 20/stat');
+		  .setTitle('Attrs tech 1/3 — visée ~60 pts ici');
 		attrModal1.addComponents(
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_puiss_serv').setLabel('Puissance service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_effet_serv').setLabel('Effet service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
@@ -1620,19 +1629,41 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
 		  return isNaN(v) ? null : v;
 		};
+		const rawA1 = { a_puiss_serv: interaction.fields.getTextInputValue('a_puiss_serv'), a_effet_serv: interaction.fields.getTextInputValue('a_effet_serv'), a_reg_serv: interaction.fields.getTextInputValue('a_reg_serv'), a_cd: interaction.fields.getTextInputValue('a_cd'), a_reg_cd: interaction.fields.getTextInputValue('a_reg_cd') };
 		const a1 = { puiss_serv: parseAttr('a_puiss_serv'), effet_serv: parseAttr('a_effet_serv'), reg_serv: parseAttr('a_reg_serv'), cd: parseAttr('a_cd'), reg_cd: parseAttr('a_reg_cd') };
-		for (const [k, v] of Object.entries(a1)) {
-		  if (v === null || v < 1 || v > 20)
-			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
+		const invalidA1 = Object.entries(a1).find(([, v]) => v === null || v < 1 || v > 20);
+		if (invalidA1) {
+		  const fix1 = new ModalBuilder().setCustomId(`cj_attr1:${interaction.user.id}`).setTitle('Attrs tech 1/3 — corrige les valeurs');
+		  fix1.addComponents(
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_puiss_serv').setLabel('Puissance service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA1.a_puiss_serv)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_effet_serv').setLabel('Effet service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA1.a_effet_serv)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_serv').setLabel('Régularité service (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA1.a_reg_serv)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_cd').setLabel('Coup droit (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA1.a_cd)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_cd').setLabel('Régularité coup droit (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA1.a_reg_cd)),
+		  );
+		  return interaction.showModal(fix1);
 		}
 		cjSessions.set(interaction.user.id, { ...sess10, a1 });
 
+		const spent1 = Object.values(a1).reduce((s, v) => s + v, 0);
+		const remaining2 = 180 - spent1;
+		const avgRemaining2 = Math.round(remaining2 / 2);
 		const btnAttr2 = new ButtonBuilder()
 		  .setCustomId(`cj_open_attr2:${interaction.user.id}`)
-		  .setLabel('➡️ Attributs techniques (2/3)')
+		  .setLabel(`➡️ Attributs techniques (2/3) — ${remaining2} pts restants`)
 		  .setStyle(ButtonStyle.Primary);
 		return interaction.reply({
-		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Attributs 1/3 enregistrés !')],
+		  embeds: [new EmbedBuilder()
+			.setColor(spent1 <= 65 ? 0x2ecc71 : 0xe67e22)
+			.setTitle('🎾 Attributs techniques — écran 2/3')
+			.setDescription(
+			  `✅ Écran 1/3 validé — **${spent1} pts dépensés**\n\n` +
+			  `**Pts restants :** ${remaining2} / 180 (sur 2 écrans)\n` +
+			  `**Conseil :** vise environ **${avgRemaining2} pts sur cet écran** pour garder de la marge.\n\n` +
+			  `> Chaque stat : min **1**, max **20**\n` +
+			  `> Écran 2 — Revers, Retour & Volée` +
+			  (spent1 > 65 ? `\n\n⚠️ Tu as dépensé beaucoup sur l'écran 1 — ajuste en conséquence !` : '')
+			)],
 		  components: [new ActionRowBuilder().addComponents(btnAttr2)],
 		  ephemeral: true,
 		});
@@ -1646,7 +1677,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (interaction.user.id !== userId10b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const attrModal2 = new ModalBuilder()
 		  .setCustomId(`cj_attr2:${interaction.user.id}`)
-		  .setTitle('Attributs techniques (2/3)');
+		  .setTitle('Attrs tech 2/3 — visée ~60 pts ici');
 		attrModal2.addComponents(
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_revers').setLabel('Revers (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_rv').setLabel('Régularité revers (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
@@ -1670,19 +1701,42 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
 		  return isNaN(v) ? null : v;
 		};
+		const rawA2 = { a_revers: interaction.fields.getTextInputValue('a_revers'), a_reg_rv: interaction.fields.getTextInputValue('a_reg_rv'), a_retour: interaction.fields.getTextInputValue('a_retour'), a_contre: interaction.fields.getTextInputValue('a_contre'), a_volee: interaction.fields.getTextInputValue('a_volee') };
 		const a2 = { revers: parseAttr('a_revers'), reg_rv: parseAttr('a_reg_rv'), retour: parseAttr('a_retour'), contre: parseAttr('a_contre'), volee: parseAttr('a_volee') };
-		for (const [k, v] of Object.entries(a2)) {
-		  if (v === null || v < 1 || v > 20)
-			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
+		const invalidA2 = Object.entries(a2).find(([, v]) => v === null || v < 1 || v > 20);
+		if (invalidA2) {
+		  const fix2 = new ModalBuilder().setCustomId(`cj_attr2:${interaction.user.id}`).setTitle('Attrs tech 2/3 — corrige les valeurs');
+		  fix2.addComponents(
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_revers').setLabel('Revers (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA2.a_revers)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_reg_rv').setLabel('Régularité revers (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA2.a_reg_rv)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_retour').setLabel('Retour (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA2.a_retour)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_contre').setLabel('Contre (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA2.a_contre)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_volee').setLabel('Volée (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA2.a_volee)),
+		  );
+		  return interaction.showModal(fix2);
 		}
 		cjSessions.set(interaction.user.id, { ...sess11, a2 });
 
+		const spent1b = Object.values(sess11.a1 ?? {}).reduce((s, v) => s + v, 0);
+		const spent2 = Object.values(a2).reduce((s, v) => s + v, 0);
+		const remaining3 = 180 - spent1b - spent2;
+		const isOk3 = remaining3 >= 5 && remaining3 <= 100; // 5 stats × [1–20]
 		const btnAttr3 = new ButtonBuilder()
 		  .setCustomId(`cj_open_attr3:${interaction.user.id}`)
-		  .setLabel('➡️ Attributs techniques (3/3)')
-		  .setStyle(ButtonStyle.Primary);
+		  .setLabel(`➡️ Attributs techniques (3/3) — ${remaining3} pts à placer`)
+		  .setStyle(isOk3 ? ButtonStyle.Primary : ButtonStyle.Danger);
 		return interaction.reply({
-		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Attributs 2/3 enregistrés !')],
+		  embeds: [new EmbedBuilder()
+			.setColor(isOk3 ? 0x2ecc71 : 0xe74c3c)
+			.setTitle('🎾 Attributs techniques — écran 3/3 (dernier !)')
+			.setDescription(
+			  `✅ Écran 2/3 validé — **${spent2} pts dépensés** (écran 2)\n` +
+			  `📊 Total dépensé : **${spent1b + spent2} / 180**\n\n` +
+			  `**Tu dois placer exactement ${remaining3} pts sur cet écran** (5 stats).\n` +
+			  `> Min par stat : **1** — Max par stat : **20**\n` +
+			  `> Écran 3 — Lift, Coupé, Amorti, Contrôle & Timing` +
+			  (!isOk3 ? `\n\n⛔ ${remaining3 < 5 ? 'Trop peu de points restants (min 5 pour 5 stats)' : 'Trop de points restants (max 100 pour 5 stats × 20)'}. Relance \`/creer-joueur\`.` : '')
+			)],
 		  components: [new ActionRowBuilder().addComponents(btnAttr3)],
 		  ephemeral: true,
 		});
@@ -1696,7 +1750,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (interaction.user.id !== userId11b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const attrModal3 = new ModalBuilder()
 		  .setCustomId(`cj_attr3:${interaction.user.id}`)
-		  .setTitle('Attributs techniques (3/3)');
+		  .setTitle('Attrs tech 3/3 — voir pts restants ↑');
 		attrModal3.addComponents(
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_lift').setLabel('Lift (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_coupe').setLabel('Coupé (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
@@ -1720,29 +1774,49 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
 		  return isNaN(v) ? null : v;
 		};
+		const rawA3 = { a_lift: interaction.fields.getTextInputValue('a_lift'), a_coupe: interaction.fields.getTextInputValue('a_coupe'), a_amorti: interaction.fields.getTextInputValue('a_amorti'), a_controle: interaction.fields.getTextInputValue('a_controle'), a_timing: interaction.fields.getTextInputValue('a_timing') };
 		const a3 = { lift: parseAttr('a_lift'), coupe: parseAttr('a_coupe'), amorti: parseAttr('a_amorti'), controle: parseAttr('a_controle'), timing: parseAttr('a_timing') };
-		for (const [k, v] of Object.entries(a3)) {
-		  if (v === null || v < 1 || v > 20)
-			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
-		}
+
+		const reopenAttr3 = (titleSuffix) => {
+		  const fix3 = new ModalBuilder().setCustomId(`cj_attr3:${interaction.user.id}`).setTitle(`Attrs tech 3/3 — ${titleSuffix}`);
+		  fix3.addComponents(
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_lift').setLabel('Lift (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA3.a_lift)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_coupe').setLabel('Coupé (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA3.a_coupe)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_amorti').setLabel('Amorti (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA3.a_amorti)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_controle').setLabel('Contrôle (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA3.a_controle)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('a_timing').setLabel('Timing (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawA3.a_timing)),
+		  );
+		  return interaction.showModal(fix3);
+		};
+
+		const invalidA3 = Object.entries(a3).find(([, v]) => v === null || v < 1 || v > 20);
+		if (invalidA3) return reopenAttr3('corrige les valeurs');
 
 		const allAttrs = { ...prev.a1, ...prev.a2, ...a3 };
 		const total = Object.values(allAttrs).reduce((s, v) => s + v, 0);
 		if (total !== 180) {
-		  return interaction.reply({
-			embeds: [err(`Total des attributs = **${total}/180**. Tu dois répartir exactement 180 points. Relance \`/creer-joueur\`.`)],
-			ephemeral: true,
-		  });
+		  const delta = total - 180;
+		  const sign = delta > 0 ? `+${delta}` : `${delta}`;
+		  return reopenAttr3(`${sign} pts — ajuste ici`);
 		}
 
 		cjSessions.set(interaction.user.id, { ...prev, a3 });
 
 		const btnPhysAttr = new ButtonBuilder()
 		  .setCustomId(`cj_open_physattr:${interaction.user.id}`)
-		  .setLabel('➡️ Attributs physiques')
+		  .setLabel('➡️ Attributs physiques — 80 pts à répartir')
 		  .setStyle(ButtonStyle.Primary);
 		return interaction.reply({
-		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Attributs 3/3 enregistrés ! Total technique : **180/180** ✅')],
+		  embeds: [new EmbedBuilder()
+			.setColor(0x2ecc71)
+			.setTitle('💪 Attributs physiques')
+			.setDescription(
+			  '✅ Attributs techniques validés — **180/180** ✅\n\n' +
+			  '**Budget physique :** 80 pts à répartir sur **5 stats** + **endurance auto-calculée**\n\n' +
+			  '> Chaque stat : min **1**, max **20**\n' +
+			  '> **L\'endurance** sera calculée automatiquement : `endurance = 80 − (somme des 5 stats)`\n' +
+			  '> Pour que l\'endurance soit valide (1–20), place entre **60 et 79 pts** au total sur les 5 stats.'
+			)],
 		  components: [new ActionRowBuilder().addComponents(btnPhysAttr)],
 		  ephemeral: true,
 		});
@@ -1756,7 +1830,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (interaction.user.id !== userId12b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const physAttrModal = new ModalBuilder()
 		  .setCustomId(`cj_physattr:${interaction.user.id}`)
-		  .setTitle('Attributs physiques — 80 pts, max 20/stat');
+		  .setTitle('Attrs physiques — 60–79 pts (endurance auto)');
 		physAttrModal.addComponents(
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_accel').setLabel('Accélération (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_jambes').setLabel('Jeu de jambes (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
@@ -1781,6 +1855,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  return isNaN(v) ? null : v;
 		};
 
+		const rawPhys = { p_accel: interaction.fields.getTextInputValue('p_accel'), p_jambes: interaction.fields.getTextInputValue('p_jambes'), p_equilibre: interaction.fields.getTextInputValue('p_equilibre'), p_agilite: interaction.fields.getTextInputValue('p_agilite'), p_capa_phys: interaction.fields.getTextInputValue('p_capa_phys') };
+
 		const physAttrs = {
 		  acceleration:    parseAttr('p_accel'),
 		  jeu_de_jambes:   parseAttr('p_jambes'),
@@ -1789,18 +1865,27 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  capacite_physique: parseAttr('p_capa_phys'),
 		};
 
+		const reopenPhys = (titleSuffix) => {
+		  const fixP = new ModalBuilder().setCustomId(`cj_physattr:${interaction.user.id}`).setTitle(`Attrs physiques — ${titleSuffix}`);
+		  fixP.addComponents(
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_accel').setLabel('Accélération (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawPhys.p_accel)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_jambes').setLabel('Jeu de jambes (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawPhys.p_jambes)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_equilibre').setLabel('Équilibre (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawPhys.p_equilibre)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_agilite').setLabel('Agilité (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawPhys.p_agilite)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('p_capa_phys').setLabel('Capacité physique (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawPhys.p_capa_phys)),
+		  );
+		  return interaction.showModal(fixP);
+		};
+
 		// Note: endurance est calculée automatiquement pour atteindre exactement 80 pts
 		const sumFive = Object.values(physAttrs).reduce((s, v) => s + (v ?? 0), 0);
-		for (const [k, v] of Object.entries(physAttrs)) {
-		  if (v === null || v < 1 || v > 20)
-			return interaction.reply({ embeds: [err(`Valeur invalide pour "${k}". Chaque stat doit être entre 1 et 20.`)], ephemeral: true });
-		}
+		const invalidPhys = Object.entries(physAttrs).find(([, v]) => v === null || v < 1 || v > 20);
+		if (invalidPhys) return reopenPhys('corrige les valeurs');
+
 		const endurance = 80 - sumFive;
 		if (endurance < 1 || endurance > 20) {
-		  return interaction.reply({
-			embeds: [err(`Total des 5 stats = **${sumFive}**. L'endurance calculée automatiquement serait **${endurance}** (doit être entre 1 et 20). Ajuste tes valeurs pour que le total des 5 stats soit entre 60 et 79. Relance \`/creer-joueur\`.`)],
-			ephemeral: true,
-		  });
+		  const needed = endurance < 1 ? `enlève ${1 - endurance} pts` : `ajoute ${endurance - 20} pts`;
+		  return reopenPhys(`endurance=${endurance} → ${needed}`);
 		}
 		physAttrs.endurance = endurance;
 
