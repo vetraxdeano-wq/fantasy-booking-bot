@@ -247,7 +247,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  for (const player of players) {
 		const tmId = player.tm_player_id;
 		// Résultats éligibles (titre/finale/demi dans catégories récompensées)
-		const results = s.prepare(\`
+		const results = s.prepare(`
 		  SELECT tr.TournamentId, tr.TournamentCategoryId, tr.Year, tr.RoundReached, t.Name
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
@@ -255,7 +255,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		    AND tr.TournamentCategoryId IN (1,2,3,5,16)
 		    AND tr.RoundReached IN (-1, 0, 1)
 		  ORDER BY tr.Year ASC, tr.TournamentId ASC
-		\`).all(tmId);
+		`).all(tmId);
 
 		const already = new Set(player.rewarded_results ?? []);
 		const newRewarded = [];
@@ -263,7 +263,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const lines = [];
 
 		for (const r of results) {
-		  const key = \`\${r.TournamentId}-\${r.Year}-\${r.RoundReached}\`;
+		  const key = `\${r.TournamentId}-\${r.Year}-\${r.RoundReached}`;
 		  if (already.has(key)) continue;
 		  const catRewards = REWARD_TABLE[r.TournamentCategoryId];
 		  if (!catRewards) continue;
@@ -274,13 +274,13 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  newRewarded.push(key);
 		  const catLabel   = REWARD_CAT_LABEL[r.TournamentCategoryId] ?? '?';
 		  const roundLabel = REWARD_ROUND_LABEL[String(r.RoundReached)] ?? '?';
-		  lines.push(\`\${roundLabel} \${r.Name} (\${r.Year}) [**\${catLabel}**] → **+\${coins} 🪙**\`);
+		  lines.push(`\${roundLabel} \${r.Name} (\${r.Year}) [**\${catLabel}**] → **+\${coins} 🪙**`);
 		}
 
 		if (!newRewarded.length) continue;
 
 		// Créditer + sauvegarder les clés récompensées
-		await db.addCoins(player.discord_id, totalGain, \`Récompenses tournois (reload)\`);
+		await db.addCoins(player.discord_id, totalGain, `Récompenses tournois (reload)`);
 		const allRewarded = [...already, ...newRewarded];
 		await supabase.from('players').update({ rewarded_results: allRewarded }).eq('discord_id', player.discord_id);
 
@@ -299,30 +299,30 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  ];
 
 	  // Pour chaque année disponible dans le classement final
-	  const seasonDates = s.prepare(\`
+	  const seasonDates = s.prepare(`
 		SELECT strftime('%Y', Date, 'unixepoch') AS year, MAX(Date) AS maxDate
 		FROM Ranking WHERE Circuit=0
 		GROUP BY year ORDER BY year ASC
-	  \`).all();
+	  `).all();
 
 	  for (const player of players) {
 		const tmId   = player.tm_player_id;
 		const already = new Set(player.rewarded_results ?? []);
 
 		for (const { year, maxDate } of seasonDates) {
-		  const rKey = \`ranking-\${year}-\${player.discord_id}\`;
+		  const rKey = `ranking-\${year}-\${player.discord_id}`;
 		  if (already.has(rKey)) continue;
 
-		  const row = s.prepare(\`
+		  const row = s.prepare(`
 			SELECT Rank FROM Ranking
 			WHERE PlayerId=? AND Circuit=0 AND Date=?
-		  \`).get(tmId, maxDate);
+		  `).get(tmId, maxDate);
 		  if (!row) continue;
 
 		  const tier = RANK_REWARDS.find(t => row.Rank <= t.max);
 		  if (!tier) continue;
 
-		  await db.addCoins(player.discord_id, tier.coins, \`Classement final \${year} (\${tier.label})\`);
+		  await db.addCoins(player.discord_id, tier.coins, `Classement final \${year} (\${tier.label})`);
 		  await supabase.from('players')
 			.update({ rewarded_results: [...already, rKey] })
 			.eq('discord_id', player.discord_id);
@@ -335,7 +335,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			notifications.push(notif);
 		  }
 		  notif.total += tier.coins;
-		  notif.lines.push(\`\${tier.label} ATP \${year} → **+\${tier.coins} 🪙**\`);
+		  notif.lines.push(`\${tier.label} ATP \${year} → **+\${tier.coins} 🪙**`);
 		}
 	  }
 
@@ -344,12 +344,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		for (const notif of notifications) {
 		  const embed = new EmbedBuilder()
 			.setColor(COLOR.gold)
-			.setTitle(\`🎾 Nouvelles récompenses — \${notif.name}\`)
+			.setTitle(`🎾 Nouvelles récompenses — \${notif.name}`)
 			.setDescription(notif.lines.join('\n'))
-			.addFields({ name: '💰 Total crédité', value: \`**+\${notif.total.toLocaleString()} 🪙**\` })
+			.addFields({ name: '💰 Total crédité', value: `**+\${notif.total.toLocaleString()} 🪙**` })
 			.setFooter({ text: 'Récompenses automatiques — reload save.db' })
 			.setTimestamp();
-		  try { await logChannel.send({ content: \`<@\${notif.discordId}>\`, embeds: [embed] }); }
+		  try { await logChannel.send({ content: `<@\${notif.discordId}>`, embeds: [embed] }); }
 		  catch (e) { console.error('[Rewards] Erreur envoi notif:', e.message); }
 		}
 	  }
@@ -900,7 +900,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const boosted  = boosts[key] ?? 0;
 		const val      = Math.min((p[key] ?? 0) + boosted, BOOST_ABS_CAP);
 		const boostTag = boosted > 0 ? ` ⬆+${boosted}` : '';
-		return \`\\`${label.padEnd(20)}\\` ${attrBar(val)}${boostTag}\`;
+		return `\`${label.padEnd(20)}\` ${attrBar(val)}${boostTag}`;
 	  }).join('\n');
 		embed.addFields({ name: groupName, value: lines, inline: false });
 	  }
@@ -1063,7 +1063,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const lines = slice.map((r) => {
 		const pos = r.Rank ?? (start + slice.indexOf(r)); // Rank est 0-indexé en DB
 		const displayPos = pos + 1;
-		const prefix = page === 0 && pos <= 2 ? medals[pos] : `\`#${displayPos}\``;
+		const prefix = page === 0 && pos <= 2 ? medals[pos] : `#${displayPos}`;
 		return `${prefix} **${r.Firstname} ${r.Lastname}** (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
 	  }).join('\n');
 
@@ -1072,7 +1072,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // Section joueurs de la simulation
 	  if (simuPlayers && simuPlayers.length) {
 		const simuLines = simuPlayers.map(sp => {
-		  const rankStr = sp.rank != null ? `\`#${sp.rank}\`` : '`non classé`';
+		  const rankStr = sp.rank != null ? `#${sp.rank}` : '`non classé`';
 		  return `${rankStr} **${sp.ingame_name}** — ${(sp.points ?? 0).toLocaleString()} pts`;
 		}).join('\n');
 		embed.addFields({ name: '🎮 Joueurs de la simulation', value: simuLines });
@@ -1253,7 +1253,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!await db.exists(target.id))
 		  return interaction.reply({ embeds: [err(`**${target.username}** n'a pas de joueur.`)], ephemeral: true });
 		await db.delete(target.id);
-		return interaction.reply({ embeds: [ok('Joueur supprimé', `Le joueur de <@${target.id}> a été supprimé.\nIl peut relancer \`/creer-joueur\`.`)], ephemeral: true });
+		return interaction.reply({ embeds: [ok('Joueur supprimé', `Le joueur de <@${target.id}> a été supprimé.\nIl peut relancer `/creer-joueur`.`)], ephemeral: true });
 	}
 
 	  // ── /link ─────────────────────────────────────────────────────────────────────
@@ -1309,7 +1309,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${nomQuery}"** dans le save.db.`)] });
 		  if (results.length > 1) {
 			const lines = results.map((r, i) =>
-			  `\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+			  `${i + 1}. **${r.Firstname} ${r.Lastname}** (${r.Country})`
 			).join('\n');
 			return interaction.editReply({ embeds: [
 			  new EmbedBuilder().setColor(COLOR.blue)
@@ -1386,7 +1386,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${nomQuery}"** dans le save.db.`)] });
 		  if (results.length > 1) {
 			const lines = results.map((r, i) =>
-			  `\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+			  `${i + 1}. **${r.Firstname} ${r.Lastname}** (${r.Country})`
 			).join('\n');
 			return interaction.editReply({ embeds: [
 			  new EmbedBuilder().setColor(COLOR.blue)
@@ -1459,7 +1459,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		if (results.length > 1) {
 		  const lines = results.map((r, i) =>
-			`\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+			`${i + 1}. **${r.Firstname} ${r.Lastname}** (${r.Country})`
 		  ).join('\n');
 		  return interaction.editReply({ embeds: [
 			new EmbedBuilder().setColor(COLOR.blue)
@@ -1518,7 +1518,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		if (results.length > 1) {
 		  const lines = results.map((r, i) =>
-			`\`${i + 1}.\` **${r.Firstname} ${r.Lastname}** (${r.Country})`
+			`${i + 1}. **${r.Firstname} ${r.Lastname}** (${r.Country})`
 		  ).join('\n');
 		  return interaction.editReply({ embeds: [
 			new EmbedBuilder().setColor(COLOR.blue)
@@ -1568,7 +1568,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setTitle(`🛒 Shop — ${player.ingame_name}`)
 		  .setDescription(
 			`Solde : **${player.coins.toLocaleString()} 🪙** | Plafond : **18/20** | Max par stat : **+${BOOST_MAX_PER_STAT}**\n` +
-			`Utilisez \`/boost <stat>\` pour acheter un boost.\n` +
+			`Utilisez `/boost <stat>` pour acheter un boost.\n` +
 			`Les valeurs affichées incluent déjà vos boosts actifs.`
 		  )
 		  .setFooter({ text: 'Coût exponentiel — plus la stat est haute, plus c\'est cher' });
@@ -1590,8 +1590,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			const curVal  = Math.min(baseVal + used, BOOST_ABS_CAP);
 			const canBoost = used < BOOST_MAX_PER_STAT && curVal < BOOST_ABS_CAP;
 			const cost    = canBoost ? boostCost(curVal).toLocaleString() + ' 🪙' : (curVal >= BOOST_ABS_CAP ? '🔒 plafond 18' : '🔒 +2 max atteint');
-			const boostedTag = used > 0 ? \` (+\${used})\` : '';
-			return \`\\`\${(labelOf[k] ?? k).padEnd(20)}\\` \${curVal.toFixed(1)}\${boostedTag}/20 → \${cost}\`;
+			const boostedTag = used > 0 ? ` (+\${used})` : '';
+			return `\`\${(labelOf[k] ?? k).padEnd(20)}\` \${curVal.toFixed(1)}\${boostedTag}/20 → \${cost}`;
 		  }).join('\n');
 		  embed.addFields({ name: grpName, value: lines });
 		}
@@ -1620,16 +1620,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const curVal  = Math.min(baseVal + used, BOOST_ABS_CAP);
 
 		if (used >= BOOST_MAX_PER_STAT)
-		  return interaction.reply({ embeds: [err(\`**\${statLabel}** : tu as déjà utilisé tes \${BOOST_MAX_PER_STAT} boosts sur cette stat.\`)], ephemeral: true });
+		  return interaction.reply({ embeds: [err(`**\${statLabel}** : tu as déjà utilisé tes \${BOOST_MAX_PER_STAT} boosts sur cette stat.`)], ephemeral: true });
 		if (curVal >= BOOST_ABS_CAP)
-		  return interaction.reply({ embeds: [err(\`**\${statLabel}** est déjà au plafond (18).\`)], ephemeral: true });
+		  return interaction.reply({ embeds: [err(`**\${statLabel}** est déjà au plafond (18).`)], ephemeral: true });
 
 		const cost = boostCost(curVal);
 		if (player.coins < cost)
-		  return interaction.reply({ embeds: [err(\`Solde insuffisant. Ce boost coûte **\${cost.toLocaleString()} 🪙**, tu as **\${player.coins.toLocaleString()} 🪙**.\`)], ephemeral: true });
+		  return interaction.reply({ embeds: [err(`Solde insuffisant. Ce boost coûte **\${cost.toLocaleString()} 🪙**, tu as **\${player.coins.toLocaleString()} 🪙**.`)], ephemeral: true });
 
 		// Débit + sauvegarde boost
-		const ok2 = await db.removeCoins(interaction.user.id, cost, \`Boost \${statLabel} \${curVal.toFixed(1)}→\${(curVal+1).toFixed(1)}\`);
+		const ok2 = await db.removeCoins(interaction.user.id, cost, `Boost \${statLabel} \${curVal.toFixed(1)}→\${(curVal+1).toFixed(1)}`);
 		if (!ok2) return interaction.reply({ embeds: [err('Erreur lors du paiement.')], ephemeral: true });
 
 		const newBoosts = { ...boosts, [statKey]: used + 1 };
@@ -1639,10 +1639,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setColor(COLOR.green)
 		  .setTitle('✅ Boost appliqué !')
 		  .setDescription(
-			\`**\${statLabel}** : \${curVal.toFixed(1)} → **\${(curVal + 1).toFixed(1)}** (+1)\n\` +
-			\`Coût : **-\${cost.toLocaleString()} 🪙**\n\` +
-			\`Boosts restants sur cette stat : **\${BOOST_MAX_PER_STAT - used - 1}**\n\` +
-			\`Nouveau solde : **\${(player.coins - cost).toLocaleString()} 🪙**\`
+			`**\${statLabel}** : \${curVal.toFixed(1)} → **\${(curVal + 1).toFixed(1)}** (+1)\n` +
+			`Coût : **-\${cost.toLocaleString()} 🪙**\n` +
+			`Boosts restants sur cette stat : **\${BOOST_MAX_PER_STAT - used - 1}**\n` +
+			`Nouveau solde : **\${(player.coins - cost).toLocaleString()} 🪙**`
 		  )
 		  .setFooter({ text: 'Les boosts sont permanents et visibles dans /attributs' });
 
@@ -1699,9 +1699,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			if (!rewarded?.length)
 			  return interaction.editReply({ embeds: [ok('Récompenses vérifiées', 'Aucun nouveau résultat à récompenser.')] });
 			const summary = rewarded.map(n => `• **\${n.name}** : +\${n.total.toLocaleString()} 🪙`).join('\n');
-			return interaction.editReply({ embeds: [ok(\`✅ \${rewarded.length} joueur(s) récompensé(s)\`, summary)] });
+			return interaction.editReply({ embeds: [ok(`✅ \${rewarded.length} joueur(s) récompensé(s)`, summary)] });
 		  } catch(e) {
-			return interaction.editReply({ embeds: [err(\`Erreur : \${e.message}\`)] });
+			return interaction.editReply({ embeds: [err(`Erreur : \${e.message}`)] });
 		  }
 		}
 
@@ -2162,7 +2162,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			  `**Tu dois placer exactement ${remaining3} pts sur cet écran** (5 stats).\n` +
 			  `> Min par stat : **1** — Max par stat : **20**\n` +
 			  `> Écran 3 — Lift, Coupé, Amorti, Contrôle & Timing` +
-			  (!isOk3 ? `\n\n⛔ ${remaining3 < 5 ? 'Trop peu de points restants (min 5 pour 5 stats)' : 'Trop de points restants (max 100 pour 5 stats × 20)'}. Relance \`/creer-joueur\`.` : '')
+			  (!isOk3 ? `\n\n⛔ ${remaining3 < 5 ? 'Trop peu de points restants (min 5 pour 5 stats)' : 'Trop de points restants (max 100 pour 5 stats × 20)'}. Relance `/creer-joueur`.` : '')
 			)],
 		  components: [new ActionRowBuilder().addComponents(btnAttr3)],
 		  ephemeral: true,
@@ -2573,7 +2573,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (await db.exists(interaction.user.id))
 		  return interaction.update({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], components: [] });
 		if (await db.nameTaken(sess16.n))
-		  return interaction.update({ embeds: [err(`Le nom **${sess16.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], components: [] });
+		  return interaction.update({ embeds: [err(`Le nom **${sess16.n}** a été pris entre-temps. Relance `/creer-joueur`.`)], components: [] });
 
 		await db.create({
 		  discordId:   interaction.user.id,
