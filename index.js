@@ -856,14 +856,6 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		embed.addFields({ name: 'Titres', value: '*Aucun titre remporté.*' });
 	  }
 
-	  // Finales perdues (top 5 par catégorie importante)
-	  const importantFinals = palmares.finals.filter(f => (f.Category ?? 99) <= TOURN_CAT_IMPORTANT_MAX).slice(0, 5);
-	  if (importantFinals.length) {
-		const lines = importantFinals.map(r =>
-		  `• ${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} **${r.Name}** (${r.Year})`
-		).join('\n');
-		embed.addFields({ name: '🥈 Finales perdues (GC/M1000)', value: lines });
-	  }
 
 	  return embed;
 	}
