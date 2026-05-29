@@ -463,18 +463,51 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	// Top classement mondial TM
 	function getTmClassement(limit = 20) {
 	  const s = openSaveDb();
-	  if (!s) return [];
+	  if (!s) { console.error('[Classement] save.db non disponible'); return []; }
 	  try {
-		return s.prepare(`
-		  SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country,
-		    r.Rank, r.Points
-		  FROM TennisPlayer tp
-		  JOIN Ranking r ON r.PlayerId = tp.Id
-		  WHERE tp.Retired=0 AND r.Circuit=0
-		    AND r.Date = (SELECT MAX(Date) FROM Ranking WHERE PlayerId=tp.Id AND Circuit=0)
-		  ORDER BY r.Rank ASC LIMIT ?
-		`).all(limit);
-	  } catch (e) { console.error('Classement error:', e.message); return []; }
+		// Inspecter le schéma réel de Ranking
+		const cols = s.prepare('PRAGMA table_info(Ranking)').all().map(c => c.name);
+		console.log('[Classement] Colonnes Ranking:', cols.join(', '));
+		const sample = s.prepare('SELECT * FROM Ranking LIMIT 1').get();
+		console.log('[Classement] Exemple Ranking:', JSON.stringify(sample));
+
+		const hasDate = cols.includes('Date');
+		const hasYear = cols.includes('Year');
+		const hasWeek = cols.includes('Week');
+
+		let rows = [];
+		if (hasDate) {
+		  rows = s.prepare(`
+			SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country, r.Rank, r.Points
+			FROM TennisPlayer tp
+			JOIN Ranking r ON r.PlayerId = tp.Id
+			WHERE tp.Retired=0 AND r.Circuit=0
+			  AND r.Date = (SELECT MAX(r2.Date) FROM Ranking r2 WHERE r2.PlayerId=tp.Id AND r2.Circuit=0)
+			ORDER BY r.Rank ASC LIMIT ?
+		  `).all(limit);
+		} else if (hasYear && hasWeek) {
+		  rows = s.prepare(`
+			SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country, r.Rank, r.Points
+			FROM TennisPlayer tp
+			JOIN Ranking r ON r.PlayerId = tp.Id
+			WHERE tp.Retired=0 AND r.Circuit=0
+			  AND r.Year*100+r.Week = (SELECT MAX(r2.Year*100+r2.Week) FROM Ranking r2 WHERE r2.PlayerId=tp.Id AND r2.Circuit=0)
+			ORDER BY r.Rank ASC LIMIT ?
+		  `).all(limit);
+		} else {
+		  // Fallback sans filtre de date
+		  rows = s.prepare(`
+			SELECT tp.Id, tp.Firstname, tp.Lastname, tp.Country,
+			  MIN(r.Rank) AS Rank, r.Points
+			FROM TennisPlayer tp
+			JOIN Ranking r ON r.PlayerId = tp.Id
+			WHERE tp.Retired=0 AND r.Circuit=0
+			GROUP BY tp.Id ORDER BY Rank ASC LIMIT ?
+		  `).all(limit);
+		}
+		console.log('[Classement]', rows.length, 'joueurs trouvés');
+		return rows;
+	  } catch (e) { console.error('[Classement] Erreur SQL:', e.message); return []; }
 	  finally { s.close(); }
 	}
 
