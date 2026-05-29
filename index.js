@@ -822,35 +822,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		embed.addFields({ name: '🩹 Blessures actives', value: `${injuries.length} blessure(s) en cours`, inline: false });
 	  }
 
-	  // ── Classement ──────────────────────────────────────────────────────────────
-	  embed.addFields(
-		{ name: '─────── 📈 Classement ───────', value: '\u200B' },
-		{ name: '🏅 Rang ATP',     value: rank.Rank != null ? `**#${rank.Rank + 1}**` : '—',                         inline: true },
-		{ name: '🏆 Meilleur rang',value: bestRank != null ? `**#${bestRank}**` : '—',                               inline: true },
-		{ name: '🔢 Points ATP',   value: rank.Points != null ? `${rank.Points}` : '—',                               inline: true },
-		{ name: '🏟️ Tournois',   value: rank.NbTournamentPlayed != null ? `${rank.NbTournamentPlayed}` : '—',       inline: true },
-		{ name: '🏎️ Race rang',   value: race.RaceRank != null ? `**#${race.RaceRank + 1}**` : '—',                 inline: true },
-		{ name: '💵 Prize money', value: moneyFmt(totalMoney),                                                        inline: true },
-	  );
-
-	  // ── Palmarès ────────────────────────────────────────────────────────────────
-	  embed.addFields(
-		{ name: '─────── 🏆 Palmarès ───────', value: '\u200B' },
-		{ name: '🏆 Titres',  value: `**${titles}**`,                                              inline: true },
-		{ name: '🥈 Finales', value: `**${finals}**`,                                              inline: true },
-		{ name: '📊 Bilan',   value: stats.played ? `**${stats.won}V** / ${(stats.played - stats.won)}D (${pct(stats.won, stats.played)})` : '—', inline: true },
-	  );
-
-	  // ── Attributs (condensé) ────────────────────────────────────────────────────
+	  // ── Attributs détaillés par groupe ─────────────────────────────────────────
 	  if (p) {
-		// Calcul des moyennes par groupe à partir de ATTR_GROUPS
-		const groupAvgs = Object.entries(ATTR_GROUPS).map(([groupName, attrs]) => {
-		  const vals = attrs.map(([key]) => p[key] ?? 0);
-		  const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : '—';
-		  return { groupName, avg };
-		});
-		const attrLine = groupAvgs.map(g => `${g.groupName} **${g.avg}**`).join('\n');
-		embed.addFields({ name: '─────── 🎯 Attributs (moyennes) ───────', value: attrLine });
+		const boosts = {}; // pas de boosts dans le contexte profil simple
+		for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
+		  const lines = attrs.map(([key, label]) => {
+			const val = p[key] ?? 0;
+			return `\`${label.padEnd(20)}\` ${attrBar(val)}`;
+		  }).join('\n');
+		  embed.addFields({ name: groupName, value: lines, inline: false });
+		}
 	  }
 
 	  // ── Maîtrise surface ────────────────────────────────────────────────────────
@@ -1333,20 +1314,22 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  const embedTm = new EmbedBuilder()
 			.setColor(COLOR.tennis)
 			.setTitle(`🎾 ${p.Firstname} ${p.Lastname} (${p.Country ?? '—'})`)
-			.setDescription(`${HAND_LABEL[p.Handedness] ?? '—'} — ${BH_LABEL[p.BackhandStyle] ?? '—'}`)
+			.setDescription(`${HAND_LABEL[p.Handedness] ?? '—'} — ${BH_LABEL[p.BackhandStyle] ?? '—'} | Âge : **${age(p.DateOfBirth)} ans**`)
 			.setFooter({ text: 'Tennis Manager 2026 — Profil TM' })
 			.setTimestamp();
 		  embedTm.addFields(
-			{ name: '📈 Rang ATP',   value: tm.rank.Rank != null ? `**#${tm.rank.Rank}**` : '—', inline: true },
-			{ name: '🔢 Points',     value: tm.rank.Points != null ? `${tm.rank.Points}` : '—',  inline: true },
-			{ name: '🏆 Titres',     value: `**${tm.titles}**`,                                   inline: true },
-			{ name: '🥈 Finales',    value: `**${tm.finals}**`,                                   inline: true },
-			{ name: '📊 Bilan',      value: tm.stats.played ? `**${tm.stats.won}V** / ${tm.stats.played - tm.stats.won}D (${pct(tm.stats.won, tm.stats.played)})` : '—', inline: true },
-			{ name: '💵 Prize money',value: moneyFmt(tm.totalMoney),                              inline: true },
-			{ name: '⭐ Potentiel',  value: `${(p.Potential ?? 0).toFixed(1)}/20`,               inline: true },
 			{ name: '💪 Condition',  value: `${p.PhysicalCondition ?? '—'}/100`,                 inline: true },
 			{ name: '❤️ Moral',      value: `${p.Morale ?? '—'}/100`,                            inline: true },
+			{ name: '🌟 Notoriété',  value: `${(p.Fame ?? 0).toFixed(1)}/20`,                    inline: true },
 		  );
+		  // Attributs détaillés
+		  for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
+			const lines = attrs.map(([key, label]) => {
+			  const val = p[key] ?? 0;
+			  return `\`${label.padEnd(20)}\` ${attrBar(val)}`;
+			}).join('\n');
+			embedTm.addFields({ name: groupName, value: lines, inline: false });
+		  }
 		  if (tm.surfStats.length) {
 			const lines = tm.surfStats.map(s =>
 			  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
