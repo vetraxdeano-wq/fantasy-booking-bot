@@ -319,8 +319,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		).get(tmPlayerId)?.cnt ?? 0;
 
 		const lastResults = s.prepare(`
-		  SELECT t.Name, tr.Year, tr.RoundReached, tr.MoneyWon
-		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
 		  WHERE tr.PlayerId=?
 		  ORDER BY tr.Date DESC LIMIT 5
 		`).all(tmPlayerId);
@@ -357,8 +359,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	}
 
 	// ── Catégories de tournois ───────────────────────────────────────────────────
-	const TOURN_CAT = { 0: 'Grand Chelem', 1: 'Masters 1000', 2: 'ATP 500', 3: 'ATP 250', 4: 'Masters Cup' };
-	const TOURN_CAT_EMOJI = { 0: '🏆', 1: '🥇', 2: '🥈', 3: '🥉', 4: '👑' };
+	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
+	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥇', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
+	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2)
 
 	function getTmPlayerByName(query) {
 	  const s = openSaveDb();
@@ -691,7 +694,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── Derniers résultats ───────────────────────────────────────────────────────
 	  if (lastResults.length) {
 		const lines = lastResults.map(r =>
-		  `${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+		  `${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} ${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
 		).join('\n');
 		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
 	  }
@@ -772,7 +775,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  if (lastResults.length) {
 		const lines = lastResults.map(r =>
-		  `${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+		  `${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} ${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
 		).join('\n');
 		embed.addFields({ name: '📋 Derniers résultats', value: lines });
 	  }
@@ -853,7 +856,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  }
 
 	  // Finales perdues (top 5 par catégorie importante)
-	  const importantFinals = palmares.finals.filter(f => (f.Category ?? 3) <= 1).slice(0, 5);
+	  const importantFinals = palmares.finals.filter(f => (f.Category ?? 99) <= TOURN_CAT_IMPORTANT_MAX).slice(0, 5);
 	  if (importantFinals.length) {
 		const lines = importantFinals.map(r =>
 		  `• ${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} **${r.Name}** (${r.Year})`
@@ -883,8 +886,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  const medals = ['🥇', '🥈', '🥉'];
 	  const lines = slice.map((r) => {
-		const pos = r.Rank ?? (start + slice.indexOf(r) + 1);
-		const prefix = page === 0 && pos <= 3 ? medals[pos - 1] : `\`#${pos}\``;
+		const pos = r.Rank ?? (start + slice.indexOf(r)); // Rank est 0-indexé en DB
+		const displayPos = pos + 1;
+		const prefix = page === 0 && pos <= 2 ? medals[pos] : `\`#${displayPos}\``;
 		return `${prefix} **${r.Firstname} ${r.Lastname}** (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
 	  }).join('\n');
 
@@ -1151,7 +1155,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  }
 		  if (tm.lastResults.length) {
 			const lines = tm.lastResults.map(r =>
-			  `${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+			  `${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} ${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
 			).join('\n');
 			embedTm.addFields({ name: '📋 Derniers résultats', value: lines });
 		  }
