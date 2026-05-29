@@ -1794,10 +1794,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		const allAttrs = { ...prev.a1, ...prev.a2, ...a3 };
 		const total = Object.values(allAttrs).reduce((s, v) => s + v, 0);
-		if (total !== 180) {
+		if (total > 180) {
 		  const delta = total - 180;
-		  const sign = delta > 0 ? `+${delta}` : `${delta}`;
-		  return reopenAttr3(`${sign} pts — ajuste ici`);
+		  return reopenAttr3(`+${delta} pts en trop — réduis ici`);
 		}
 
 		cjSessions.set(interaction.user.id, { ...prev, a3 });
@@ -1811,7 +1810,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			.setColor(0x2ecc71)
 			.setTitle('💪 Attributs physiques')
 			.setDescription(
-			  '✅ Attributs techniques validés — **180/180** ✅\n\n' +
+			  `✅ Attributs techniques validés — **${total}/180** ✅\n\n` +
 			  '**Budget physique :** 80 pts à répartir sur **5 stats** + **endurance auto-calculée**\n\n' +
 			  '> Chaque stat : min **1**, max **20**\n' +
 			  '> **L\'endurance** sera calculée automatiquement : `endurance = 80 − (somme des 5 stats)`\n' +
@@ -1889,34 +1888,151 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		}
 		physAttrs.endurance = endurance;
 
-		const allAttrs = { ...prev.a1, ...prev.a2, ...prev.a3 };
+		cjSessions.set(interaction.user.id, { ...prev, physAttrs });
+
+		const btnMental = new ButtonBuilder()
+		  .setCustomId(`cj_open_mental:${interaction.user.id}`)
+		  .setLabel('➡️ Attributs mentaux — 80 pts à répartir')
+		  .setStyle(ButtonStyle.Primary);
+		return interaction.reply({
+		  embeds: [new EmbedBuilder()
+			.setColor(0x2ecc71)
+			.setTitle('🧠 Attributs mentaux')
+			.setDescription(
+			  `✅ Attributs physiques validés — endurance auto : **${endurance}** ✅\n\n` +
+			  '**Budget mental :** 80 pts à répartir sur **6 stats** (exactement)\n\n' +
+			  '> Chaque stat : min **1**, max **20**\n' +
+			  '> Le total doit être **exactement 80** (rien n\'est calculé automatiquement)\n' +
+			  '> Stats : Anticipation · Concentration · Sens tactique · Sang froid · Instinct de tueur · Ténacité'
+			)],
+		  components: [new ActionRowBuilder().addComponents(btnMental)],
+		  ephemeral: true,
+		});
+	  });
+
+	  // Étape 13b : bouton → ouvre modal attributs mentaux
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('cj_open_mental:')) return;
+		const userId13b = interaction.customId.split(':')[1];
+		if (interaction.user.id !== userId13b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
+		const sess13b = cjSessions.get(userId13b) ?? cjSessions.get(interaction.user.id);
+		if (!sess13b) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+		const mentalModal = new ModalBuilder()
+		  .setCustomId(`cj_mental:${interaction.user.id}`)
+		  .setTitle('Attrs mentaux — exactement 80 pts');
+		mentalModal.addComponents(
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_concentration').setLabel('Concentration (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_sens_tactique').setLabel('Sens tactique (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_sang_froid').setLabel('Sang froid (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_instinct').setLabel('Instinct de tueur (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		);
+		return interaction.showModal(mentalModal);
+	  });
+
+	  // Étape 14 : modal mentaux page 1 soumis (5 stats) → bouton page 2 (ténacité)
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('cj_mental:')) return;
+
+		const userId14 = interaction.customId.split(':')[1];
+		const prev14 = cjSessions.get(userId14) ?? cjSessions.get(interaction.user.id);
+		if (!prev14) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		const parseAttr = (key) => {
+		  const v = parseInt(interaction.fields.getTextInputValue(key), 10);
+		  return isNaN(v) ? null : v;
+		};
+
+		const rawM1 = { m_anticipation: interaction.fields.getTextInputValue('m_anticipation'), m_concentration: interaction.fields.getTextInputValue('m_concentration'), m_sens_tactique: interaction.fields.getTextInputValue('m_sens_tactique'), m_sang_froid: interaction.fields.getTextInputValue('m_sang_froid'), m_instinct: interaction.fields.getTextInputValue('m_instinct') };
+		const m1 = { anticipation: parseAttr('m_anticipation'), concentration: parseAttr('m_concentration'), sens_tactique: parseAttr('m_sens_tactique'), sang_froid: parseAttr('m_sang_froid'), instinct_tueur: parseAttr('m_instinct') };
+
+		const reopenMental1 = (titleSuffix) => {
+		  const fixM = new ModalBuilder().setCustomId(`cj_mental:${interaction.user.id}`).setTitle(`Attrs mentaux — ${titleSuffix}`);
+		  fixM.addComponents(
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawM1.m_anticipation)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_concentration').setLabel('Concentration (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawM1.m_concentration)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_sens_tactique').setLabel('Sens tactique (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawM1.m_sens_tactique)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_sang_froid').setLabel('Sang froid (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawM1.m_sang_froid)),
+			new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_instinct').setLabel('Instinct de tueur (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2).setValue(rawM1.m_instinct)),
+		  );
+		  return interaction.showModal(fixM);
+		};
+
+		const invalidM1 = Object.entries(m1).find(([, v]) => v === null || v < 1 || v > 20);
+		if (invalidM1) return reopenMental1('corrige les valeurs');
+
+		const sumM1 = Object.values(m1).reduce((s, v) => s + v, 0);
+		if (sumM1 >= 80) return reopenMental1(`${sumM1}/80 déjà — réduis ici`);
+
+		const tenaciteNeeded = 80 - sumM1;
+		cjSessions.set(interaction.user.id, { ...prev14, m1, tenaciteNeeded });
+
+		// Discord max 5 inputs par modal — ténacité sur un 2e modal
+		const btnTenacite = new ButtonBuilder()
+		  .setCustomId(`cj_open_tenacite:${interaction.user.id}`)
+		  .setLabel(`➡️ Ténacité — il te reste ${tenaciteNeeded} pts`)
+		  .setStyle(tenaciteNeeded >= 1 && tenaciteNeeded <= 20 ? ButtonStyle.Primary : ButtonStyle.Danger);
+		return interaction.reply({
+		  embeds: [new EmbedBuilder()
+			.setColor(tenaciteNeeded >= 1 && tenaciteNeeded <= 20 ? 0x2ecc71 : 0xe74c3c)
+			.setTitle('🧠 Attributs mentaux — Ténacité')
+			.setDescription(
+			  `✅ 5 stats mentales enregistrées — **${sumM1}/80**\n\n` +
+			  `**Ténacité calculée automatiquement : ${tenaciteNeeded}**\n` +
+			  (tenaciteNeeded >= 1 && tenaciteNeeded <= 20
+				? `> ✅ Valeur valide (1–20) — clique pour confirmer`
+				: `> ⛔ Valeur invalide (doit être entre 1 et 20) — retourne modifier les 5 stats`)
+			)],
+		  components: [new ActionRowBuilder().addComponents(btnTenacite)],
+		  ephemeral: true,
+		});
+	  });
+
+	  // Étape 14b : bouton ténacité → confirmation et création joueur
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('cj_open_tenacite:')) return;
+		const userId14b = interaction.customId.split(':')[1];
+		if (interaction.user.id !== userId14b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
+		const sess14b = cjSessions.get(userId14b) ?? cjSessions.get(interaction.user.id);
+		if (!sess14b) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+		if (!sess14b.tenaciteNeeded || sess14b.tenaciteNeeded < 1 || sess14b.tenaciteNeeded > 20)
+		  return interaction.reply({ embeds: [err('Ténacité invalide. Relance `/creer-joueur`.')], ephemeral: true });
+
+		const mentalAttrs = { ...sess14b.m1, tenacite: sess14b.tenaciteNeeded };
+
+		const allAttrs = { ...sess14b.a1, ...sess14b.a2, ...sess14b.a3 };
 		const totalTech = Object.values(allAttrs).reduce((s, v) => s + v, 0);
+		const physAttrs = sess14b.physAttrs;
 
 		cjSessions.delete(interaction.user.id);
 
 		// Vérifications finales
 		if (await db.exists(interaction.user.id))
 		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
-		if (await db.nameTaken(prev.n))
-		  return interaction.reply({ embeds: [err(`Le nom **${prev.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], ephemeral: true });
+		if (await db.nameTaken(sess14b.n))
+		  return interaction.reply({ embeds: [err(`Le nom **${sess14b.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], ephemeral: true });
 
 		await db.create({
 		  discordId:   interaction.user.id,
 		  username:    interaction.user.username,
-		  ingameName:  prev.n,
-		  nationality: prev.p,
-		  trait1:      prev.t1,
-		  trait2:      prev.t2,
-		  trait3:      prev.t3,
-		  mainHand:    prev.main,
-		  backhand:    prev.revers,
-		  taille:      prev.taille,
-		  poids:       prev.poids,
+		  ingameName:  sess14b.n,
+		  nationality: sess14b.p,
+		  trait1:      sess14b.t1,
+		  trait2:      sess14b.t2,
+		  trait3:      sess14b.t3,
+		  mainHand:    sess14b.main,
+		  backhand:    sess14b.revers,
+		  taille:      sess14b.taille,
+		  poids:       sess14b.poids,
 		  attrs:       allAttrs,
 		  physAttrs:   physAttrs,
+		  mentalAttrs: mentalAttrs,
 		});
 
-		const traitsLine = `🧠 **${prev.t1}** · **${prev.t2}** · **${prev.t3}**`;
+		const traitsLine = `🧠 **${sess14b.t1}** · **${sess14b.t2}** · **${sess14b.t3}**`;
 		const statsBlock =
 		  `🎯 **Service** — Puissance: ${allAttrs.puiss_serv} · Effet: ${allAttrs.effet_serv} · Régularité: ${allAttrs.reg_serv}\n` +
 		  `🏓 **Fond** — CD: ${allAttrs.cd} (rég. ${allAttrs.reg_cd}) · RV: ${allAttrs.revers} (rég. ${allAttrs.reg_rv})\n` +
@@ -1925,13 +2041,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  `🎛️ **Précision** — Contrôle: ${allAttrs.controle} · Timing: ${allAttrs.timing}\n` +
 		  `📊 **Total technique : ${totalTech}/180**\n\n` +
 		  `🏃 **Physique** — Accél: ${physAttrs.acceleration} · Jambes: ${physAttrs.jeu_de_jambes} · Équilibre: ${physAttrs.equilibre} · Agilité: ${physAttrs.agilite} · Capa: ${physAttrs.capacite_physique} · Endurance: ${physAttrs.endurance}\n` +
-		  `📊 **Total physique : 80/80**`;
+		  `📊 **Total physique : 80/80**\n\n` +
+		  `🧠 **Mental** — Anticipation: ${mentalAttrs.anticipation} · Concentration: ${mentalAttrs.concentration} · Tactique: ${mentalAttrs.sens_tactique} · Sang froid: ${mentalAttrs.sang_froid} · Instinct: ${mentalAttrs.instinct_tueur} · Ténacité: ${mentalAttrs.tenacite}\n` +
+		  `📊 **Total mental : 80/80**`;
 
 		return interaction.reply({
 		  ephemeral: true,
 		  embeds: [ok('Joueur créé ! 🎾',
-			`Bienvenue **${prev.n}** !\n\n` +
-			`🌍 ${prev.p}  —  ${prev.main} · Revers ${prev.revers}  —  📏 ${prev.taille} cm / ⚖️ ${prev.poids} kg\n` +
+			`Bienvenue **${sess14b.n}** !\n\n` +
+			`🌍 ${sess14b.p}  —  ${sess14b.main} · Revers ${sess14b.revers}  —  📏 ${sess14b.taille} cm / ⚖️ ${sess14b.poids} kg\n` +
 			`${traitsLine}\n\n` +
 			`${statsBlock}\n\n` +
 			`💰 Solde de départ : **500 🪙**\n\n` +
