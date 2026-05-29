@@ -220,13 +220,13 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	const REWARD_TABLE = {
 	  // catId : { [-1]: titre, [0]: finale, [1]: demi }
 	  1:  { '-1': 1000, '0': 400,  '1': 150 }, // Grand Chelem
-	  2:  { '-1': 300,  '0': 100,  '1': 30  }, // Masters 1000 → traité comme ATP 500
+	  2:  { '-1': 600,  '0': 250,  '1': 80  }, // Masters 1000
 	  3:  { '-1': 300,  '0': 100,  '1': 30  }, // ATP 500
 	  5:  { '-1': 150,  '0': 50               }, // ATP 250
 	  16: { '-1': 500,  '0': 200,  '1': 60  }, // Masters Cup / Next Gen
 	};
 	// Noms lisibles pour les notifications
-	const REWARD_CAT_LABEL = { 1: 'Grand Chelem', 2: 'ATP 500', 3: 'ATP 500', 5: 'ATP 250', 16: 'Masters Cup' };
+	const REWARD_CAT_LABEL = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 16: 'Masters Cup' };
 	const REWARD_ROUND_LABEL = { '-1': '🏆 Titre', '0': '🥈 Finale', '1': '🥉 Demi-finale' };
 
 	// Vérifie les nouveaux résultats depuis le dernier reload et distribue les coins
@@ -265,14 +265,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		for (const r of results) {
 		  const key = `\${r.TournamentId}-\${r.Year}-\${r.RoundReached}`;
 		  if (already.has(key)) continue;
-		  const catRewards = REWARD_TABLE[r.TournamentCategoryId];
+		  const effectiveCat = normalizeTournCat(r.TournamentCategoryId, r.Name);
+		  const catRewards = REWARD_TABLE[effectiveCat];
 		  if (!catRewards) continue;
 		  const coins = catRewards[String(r.RoundReached)];
 		  if (!coins) continue;
 
 		  totalGain += coins;
 		  newRewarded.push(key);
-		  const catLabel   = REWARD_CAT_LABEL[r.TournamentCategoryId] ?? '?';
+		  const catLabel   = REWARD_CAT_LABEL[effectiveCat] ?? '?';
 		  const roundLabel = REWARD_ROUND_LABEL[String(r.RoundReached)] ?? '?';
 		  lines.push(`\${roundLabel} \${r.Name} (\${r.Year}) [**\${catLabel}**] → **+\${coins} 🪙**`);
 		}
@@ -512,10 +513,24 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	}
 
 	// ── Catégories de tournois ───────────────────────────────────────────────────
-	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'ATP 500', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
-	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥈', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
-	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2, traité comme ATP 500)
-	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'ATP500', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
+	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
+	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥇', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
+	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2)
+	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'M1000', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
+
+	// Noms des Masters 1000 (stockés en catId=3 dans TM2026 mais à traiter comme catId=2)
+	const MASTERS1000_NAMES = [
+	  'indian wells', 'miami', 'monte-carlo', 'monte carlo', 'madrid', 'rome', 'roma',
+	  'canada', 'montreal', 'toronto', 'cincinnati', 'shanghai', 'paris',
+	];
+	// Normalise la catégorie d'un tournoi : si catId=3 et nom = Masters 1000 → retourne 2
+	function normalizeTournCat(rawCat, tournName) {
+	  if (rawCat === 3 && tournName) {
+		const lower = tournName.toLowerCase();
+		if (MASTERS1000_NAMES.some(m => lower.includes(m))) return 2;
+	  }
+	  return rawCat;
+	}
 
 	// ── Économie & Shop ──────────────────────────────────────────────────────────
 	// Boosts : +2 max par stat, plafond absolu 18
@@ -662,8 +677,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		const byCategory = {};
 		for (const r of titles) {
-		  const rawCat = r.Category ?? 3;
-		  const cat = rawCat === 2 ? 3 : rawCat; // Masters 1000 regroupé avec ATP 500
+		  const cat = normalizeTournCat(r.Category ?? 3, r.Name);
 		  if (!byCategory[cat]) byCategory[cat] = [];
 		  byCategory[cat].push(r);
 		}
@@ -847,8 +861,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── Derniers résultats ───────────────────────────────────────────────────────
 	  if (lastResults.length) {
 		const lines = lastResults.map(r => {
+		  const cat = normalizeTournCat(r.Category, r.Name);
 		  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
-		  return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
+		  return `${TOURN_CAT_SHORT[cat] ? `[${TOURN_CAT_SHORT[cat]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
 		}).join('\n');
 		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
 	  }
@@ -946,8 +961,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  if (lastResults.length) {
 		const lines = lastResults.map(r => {
+		  const cat = normalizeTournCat(r.Category, r.Name);
 		  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
-		  return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
+		  return `${TOURN_CAT_SHORT[cat] ? `[${TOURN_CAT_SHORT[cat]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
 		}).join('\n');
 		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
 	  }
@@ -992,7 +1008,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  if (h2h.meetings.length) {
 		const lines = h2h.meetings.map(m => {
 		  const winner = m.WinnerId === p1.Id ? name1 : name2;
-		  const catLabel = TOURN_CAT_EMOJI[m.Category] ?? '🎾';
+		  const cat = normalizeTournCat(m.Category, m.TournName);
+		  const catLabel = TOURN_CAT_EMOJI[cat] ?? '🎾';
 		  return `${catLabel} **${winner}** — ${m.TournName} (${ROUND_LABEL[String(m.Round)] ?? `R${m.Round}`})`;
 		}).join('\n');
 		embed.addFields({ name: '📋 Derniers matchs', value: lines.slice(0, 1024) });
