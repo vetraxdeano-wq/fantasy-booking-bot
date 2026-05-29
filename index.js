@@ -912,6 +912,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	// ══════════════════════════════════════════════════════════════════════════════
 	//  HANDLERS
 	// ══════════════════════════════════════════════════════════════════════════════
+
+	// Sessions de création de joueur (portée module pour être accessible dans handleCommand et startBot)
+	const cjSessions = new Map(); // userId → données en cours de saisie
+
 	async function handleCommand(interaction) {
 	  const cmd = interaction.commandName;
 
@@ -920,6 +924,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	if (cmd === 'creer-joueur') {
 		if (await db.exists(interaction.user.id))
 		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
+		// Bloque si création déjà en cours (sans table Supabase active)
+		if (cjSessions.has(interaction.user.id))
+		  return interaction.reply({ embeds: [err('Tu as déjà une création de joueur en cours ! Termine le formulaire ou relance `/creer-joueur` dans quelques minutes.')], ephemeral: true });
 
 		const modal = new ModalBuilder()
 		  .setCustomId('creer_joueur_modal')
@@ -1060,7 +1067,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!player) {
 		  return interaction.editReply({ embeds: [err(
 			target.id === interaction.user.id
-			  ? 'Pas encore de joueur. Utilise `/inscription` !'
+			  ? 'Pas encore de joueur. Utilise `/creer-joueur` !'
 			  : `**${target.username}** n'a pas de joueur.`
 		  )] });
 		}
@@ -1112,7 +1119,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const player = await db.get(target.id);
 
 		if (!player)
-		  return interaction.editReply({ embeds: [err(target.id === interaction.user.id ? 'Pas encore de joueur. Utilise `/inscription` !' : `**${target.username}** n'a pas de joueur.`)] });
+		  return interaction.editReply({ embeds: [err(target.id === interaction.user.id ? 'Pas encore de joueur. Utilise `/creer-joueur` !' : `**${target.username}** n'a pas de joueur.`)] });
 
 		if (!player.tm_player_id)
 		  return interaction.editReply({ embeds: [err('Aucun joueur TM2026 lié. Utilise `/link` d\'abord.')] });
@@ -1139,7 +1146,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		await interaction.deferReply({ ephemeral: true });
 		const player = await db.get(interaction.user.id);
 		if (!player)
-		  return interaction.editReply({ embeds: [err('Pas encore de joueur. Utilise `/inscription` !')] });
+		  return interaction.editReply({ embeds: [err('Pas encore de joueur. Utilise `/creer-joueur` !')] });
 		return interaction.editReply({
 		  embeds: [buildWalletEmbed(player, await db.txHistory(interaction.user.id))],
 		});
@@ -1360,8 +1367,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ══════════════════════════════════════════════════════════════════════════════
 	  //  SESSION STORE : données de création de joueur (évite les customId trop longs)
 	  // ══════════════════════════════════════════════════════════════════════════════
-	  const cjSessions = new Map(); // userId → { n, p, s, t1, t2 }
-
+	
 	  // ══════════════════════════════════════════════════════════════════════════════
 	  //  ÉTAPES CREER-JOUEUR : modal submit + select menus personnalité
 	  // ══════════════════════════════════════════════════════════════════════════════
