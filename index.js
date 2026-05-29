@@ -843,7 +843,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  new SlashCommandBuilder()
 		.setName('link')
-		.setDescription('Associe ton compte Discord à ton joueur dans TM2026')
+		.setDescription('[Admin] Associe un joueur Discord à son personnage TM2026')
+		.setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+		.addUserOption(o => o.setName('joueur').setDescription('Joueur Discord à lier').setRequired(true))
 		.addStringOption(o => o.setName('nom').setDescription('Prénom ou nom dans TM2026').setRequired(true)),
 
 	  new SlashCommandBuilder()
@@ -958,9 +960,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── /link ─────────────────────────────────────────────────────────────────────
 	  if (cmd === 'link') {
 		await interaction.deferReply({ ephemeral: true });
-		const player = await db.get(interaction.user.id);
+
+		const target = interaction.options.getUser('joueur');
+		const player = await db.get(target.id);
 		if (!player)
-		  return interaction.editReply({ embeds: [err('Crée d\'abord ton profil avec `/inscription`.')] });
+		  return interaction.editReply({ embeds: [err(`<@${target.id}> n'a pas encore de joueur créé.`)] });
 
 		if (!seasonDbReady)
 		  return interaction.editReply({ embeds: [err('Save.db non disponible. Vérifie la configuration Supabase.')] });
@@ -973,9 +977,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		if (results.length === 1) {
 		  const tm = results[0];
-		  await db.linkTm(interaction.user.id, tm.Id);
+		  await db.linkTm(target.id, tm.Id);
 		  return interaction.editReply({ embeds: [ok('Joueur lié !',
-			`**${player.ingame_name}** est maintenant lié à **${tm.Firstname} ${tm.Lastname}** (${tm.Country}).\n\nUtilise \`/profil\` pour voir tes stats complets !`
+			`**${player.ingame_name}** (<@${target.id}>) est maintenant lié à **${tm.Firstname} ${tm.Lastname}** (${tm.Country}).`
 		  )]});
 		}
 
@@ -1900,17 +1904,19 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			.setTitle('🧠 Attributs mentaux')
 			.setDescription(
 			  `✅ Attributs physiques validés — endurance auto : **${endurance}** ✅\n\n` +
-			  '**Budget mental :** 80 pts à répartir sur **6 stats** (exactement)\n\n' +
+			  '**Budget mental :** 80 pts à répartir sur **6 stats** — même logique que le physique\n\n' +
 			  '> Chaque stat : min **1**, max **20**\n' +
-			  '> Le total doit être **exactement 80** (rien n\'est calculé automatiquement)\n' +
-			  '> Stats : Anticipation · Concentration · Sens tactique · Sang froid · Instinct de tueur · Ténacité'
+			  '> Tu saisiras **5 stats** dans le formulaire\n' +
+			  '> La **Ténacité** sera calculée automatiquement : `ténacité = 80 − (somme des 5 stats)`\n' +
+			  '> Pour que la ténacité soit valide (1–20), place entre **60 et 79 pts** au total sur les 5 stats\n\n' +
+			  '> Stats : Anticipation · Concentration · Sens tactique · Sang froid · Instinct de tueur · **Ténacité (auto)**'
 			)],
 		  components: [new ActionRowBuilder().addComponents(btnMental)],
 		  ephemeral: true,
 		});
 	  });
 
-	  // Étape 13b : bouton → ouvre modal attributs mentaux
+	  // Étape 13b : bouton → ouvre modal attributs mentaux (aussi utilisé pour retour depuis ténacité invalide)
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isButton()) return;
 		if (!interaction.customId.startsWith('cj_open_mental:')) return;
@@ -1918,9 +1924,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (interaction.user.id !== userId13b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const sess13b = cjSessions.get(userId13b) ?? cjSessions.get(interaction.user.id);
 		if (!sess13b) return interaction.reply({ embeds: [err('Session expirée, relance `/creer-joueur`.')], ephemeral: true });
+
+		// Si on revient depuis une ténacité invalide, pré-remplir avec les valeurs déjà saisies
+		const prev = sess13b.m1;
 		const mentalModal = new ModalBuilder()
 		  .setCustomId(`cj_mental:${interaction.user.id}`)
-		  .setTitle('Attrs mentaux — exactement 80 pts');
+		  .setTitle(prev ? 'Attrs mentaux — corrige pour ténacité valide' : 'Attrs mentaux (5/6) — visée 60–79 pts ici');
+		mentalModal.addComponents(
+		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)...(prev ? [v => v.setValue(String(prev.anticipation))] : []).reduce((b, fn) => fn(b), new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2))),
 		mentalModal.addComponents(
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
 		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_concentration').setLabel('Concentration (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
@@ -1969,23 +1980,34 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const tenaciteNeeded = 80 - sumM1;
 		cjSessions.set(interaction.user.id, { ...prev14, m1, tenaciteNeeded });
 
-		// Discord max 5 inputs par modal — ténacité sur un 2e modal
 		const btnTenacite = new ButtonBuilder()
 		  .setCustomId(`cj_open_tenacite:${interaction.user.id}`)
-		  .setLabel(`➡️ Ténacité — il te reste ${tenaciteNeeded} pts`)
-		  .setStyle(tenaciteNeeded >= 1 && tenaciteNeeded <= 20 ? ButtonStyle.Primary : ButtonStyle.Danger);
+		  .setLabel(`➡️ Confirmer — Ténacité : ${tenaciteNeeded}`)
+		  .setStyle(tenaciteNeeded >= 1 && tenaciteNeeded <= 20 ? ButtonStyle.Success : ButtonStyle.Danger)
+		  .setDisabled(!(tenaciteNeeded >= 1 && tenaciteNeeded <= 20));
+
+		const row = new ActionRowBuilder().addComponents(btnTenacite);
+
+		if (!(tenaciteNeeded >= 1 && tenaciteNeeded <= 20)) {
+		  const btnRetour = new ButtonBuilder()
+			.setCustomId(`cj_open_mental:${interaction.user.id}`)
+			.setLabel('↩️ Modifier les 5 stats')
+			.setStyle(ButtonStyle.Primary);
+		  row.addComponents(btnRetour);
+		}
+
 		return interaction.reply({
 		  embeds: [new EmbedBuilder()
 			.setColor(tenaciteNeeded >= 1 && tenaciteNeeded <= 20 ? 0x2ecc71 : 0xe74c3c)
-			.setTitle('🧠 Attributs mentaux — Ténacité')
+			.setTitle('🧠 Attributs mentaux — Ténacité auto')
 			.setDescription(
-			  `✅ 5 stats mentales enregistrées — **${sumM1}/80**\n\n` +
+			  `✅ 5 stats mentales enregistrées — **${sumM1} / 80**\n\n` +
 			  `**Ténacité calculée automatiquement : ${tenaciteNeeded}**\n` +
 			  (tenaciteNeeded >= 1 && tenaciteNeeded <= 20
-				? `> ✅ Valeur valide (1–20) — clique pour confirmer`
-				: `> ⛔ Valeur invalide (doit être entre 1 et 20) — retourne modifier les 5 stats`)
+				? `> ✅ Valeur valide (1–20) — clique sur **Confirmer** pour finaliser`
+				: `> ⛔ Valeur invalide — la ténacité doit être entre 1 et 20\n> Total actuel : **${sumM1}/80** → pour une ténacité valide, place entre **60 et 79 pts** sur les 5 stats\n> Utilise **↩️ Modifier les 5 stats** pour corriger`)
 			)],
-		  components: [new ActionRowBuilder().addComponents(btnTenacite)],
+		  components: [row],
 		  ephemeral: true,
 		});
 	  });
@@ -2045,17 +2067,18 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  `🧠 **Mental** — Anticipation: ${mentalAttrs.anticipation} · Concentration: ${mentalAttrs.concentration} · Tactique: ${mentalAttrs.sens_tactique} · Sang froid: ${mentalAttrs.sang_froid} · Instinct: ${mentalAttrs.instinct_tueur} · Ténacité: ${mentalAttrs.tenacite}\n` +
 		  `📊 **Total mental : 80/80**`;
 
-		return interaction.reply({
-		  ephemeral: true,
-		  embeds: [ok('Joueur créé ! 🎾',
-			`Bienvenue **${sess14b.n}** !\n\n` +
+		// Message public dans le canal
+		await interaction.channel.send({
+		  embeds: [ok('Nouveau joueur créé ! 🎾',
+			`Bienvenue <@${interaction.user.id}> — **${sess14b.n}** vient de rejoindre la simulation !\n\n` +
 			`🌍 ${sess14b.p}  —  ${sess14b.main} · Revers ${sess14b.revers}  —  📏 ${sess14b.taille} cm / ⚖️ ${sess14b.poids} kg\n` +
 			`${traitsLine}\n\n` +
 			`${statsBlock}\n\n` +
-			`💰 Solde de départ : **500 🪙**\n\n` +
-			`Utilise \`/link <nom>\` pour associer ton joueur TM2026 !`
+			`💰 Solde de départ : **500 🪙**`
 		  )],
 		});
+		// Confirmation privée
+		return interaction.reply({ content: '✅ Ton joueur a été créé avec succès !', ephemeral: true });
 	  });
 
 	  // ── Commandes slash (existant) ────────────────────────────────────────────────
