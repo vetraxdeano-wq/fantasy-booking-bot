@@ -220,13 +220,13 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	const REWARD_TABLE = {
 	  // catId : { [-1]: titre, [0]: finale, [1]: demi }
 	  1:  { '-1': 1000, '0': 400,  '1': 150 }, // Grand Chelem
-	  2:  { '-1': 600,  '0': 250,  '1': 80  }, // Masters 1000
+	  2:  { '-1': 300,  '0': 100,  '1': 30  }, // Masters 1000 → traité comme ATP 500
 	  3:  { '-1': 300,  '0': 100,  '1': 30  }, // ATP 500
 	  5:  { '-1': 150,  '0': 50               }, // ATP 250
 	  16: { '-1': 500,  '0': 200,  '1': 60  }, // Masters Cup / Next Gen
 	};
 	// Noms lisibles pour les notifications
-	const REWARD_CAT_LABEL = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 16: 'Masters Cup' };
+	const REWARD_CAT_LABEL = { 1: 'Grand Chelem', 2: 'ATP 500', 3: 'ATP 500', 5: 'ATP 250', 16: 'Masters Cup' };
 	const REWARD_ROUND_LABEL = { '-1': '🏆 Titre', '0': '🥈 Finale', '1': '🥉 Demi-finale' };
 
 	// Vérifie les nouveaux résultats depuis le dernier reload et distribue les coins
@@ -512,10 +512,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	}
 
 	// ── Catégories de tournois ───────────────────────────────────────────────────
-	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
-	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥇', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
-	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2)
-	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'M1000', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
+	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'ATP 500', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
+	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥈', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
+	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2, traité comme ATP 500)
+	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'ATP500', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
 
 	// ── Économie & Shop ──────────────────────────────────────────────────────────
 	// Boosts : +2 max par stat, plafond absolu 18
@@ -662,7 +662,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		const byCategory = {};
 		for (const r of titles) {
-		  const cat = r.Category ?? 3;
+		  const rawCat = r.Category ?? 3;
+		  const cat = rawCat === 2 ? 3 : rawCat; // Masters 1000 regroupé avec ATP 500
 		  if (!byCategory[cat]) byCategory[cat] = [];
 		  byCategory[cat].push(r);
 		}
