@@ -1931,13 +1931,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setCustomId(`cj_mental:${interaction.user.id}`)
 		  .setTitle(prev ? 'Attrs mentaux — corrige pour ténacité valide' : 'Attrs mentaux (5/6) — visée 60–79 pts ici');
 		mentalModal.addComponents(
-		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)...(prev ? [v => v.setValue(String(prev.anticipation))] : []).reduce((b, fn) => fn(b), new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2))),
-		mentalModal.addComponents(
-		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
-		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_concentration').setLabel('Concentration (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
-		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_sens_tactique').setLabel('Sens tactique (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
-		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_sang_froid').setLabel('Sang froid (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
-		  new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('m_instinct').setLabel('Instinct de tueur (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2)),
+		  new ActionRowBuilder().addComponents((() => { const b = new TextInputBuilder().setCustomId('m_anticipation').setLabel('Anticipation (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2); return prev ? b.setValue(String(prev.anticipation)) : b; })()),
+		  new ActionRowBuilder().addComponents((() => { const b = new TextInputBuilder().setCustomId('m_concentration').setLabel('Concentration (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2); return prev ? b.setValue(String(prev.concentration)) : b; })()),
+		  new ActionRowBuilder().addComponents((() => { const b = new TextInputBuilder().setCustomId('m_sens_tactique').setLabel('Sens tactique (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2); return prev ? b.setValue(String(prev.sens_tactique)) : b; })()),
+		  new ActionRowBuilder().addComponents((() => { const b = new TextInputBuilder().setCustomId('m_sang_froid').setLabel('Sang froid (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2); return prev ? b.setValue(String(prev.sang_froid)) : b; })()),
+		  new ActionRowBuilder().addComponents((() => { const b = new TextInputBuilder().setCustomId('m_instinct').setLabel('Instinct de tueur (1–20)').setStyle(TextInputStyle.Short).setRequired(true).setMinLength(1).setMaxLength(2); return prev ? b.setValue(String(prev.instinct_tueur)) : b; })()),
 		);
 		return interaction.showModal(mentalModal);
 	  });
