@@ -396,13 +396,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		`).get(id2, id1)?.cnt ?? 0;
 
 		// Derniers matchs entre les deux
-		const meetings = s.prepare(`
-		  SELECT mr.*, t.Name AS TournName, t.Category
+		// Tournament.CategoryId -> TournamentCategory.Id, Type = niveau du tournoi
+		const mrTables = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
+		const meetings = mrTables ? s.prepare(`
+		  SELECT mr.*, t.Name AS TournName, tc.Type AS Category
 		  FROM MatchResult mr
 		  JOIN Tournament t ON t.Id = mr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
 		  WHERE (mr.WinnerId=? AND mr.LoserId=?) OR (mr.WinnerId=? AND mr.LoserId=?)
 		  ORDER BY mr.Date DESC LIMIT 10
-		`).all(id1, id2, id2, id1);
+		`).all(id1, id2, id2, id1) : [];
 
 		// Surface breakdown
 		const surfH2H = s.prepare(`
@@ -420,34 +423,57 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  finally { s.close(); }
 	}
 
+	// Détecte si TournamentCategory existe et a une colonne Type
+	// Dans ce schéma : Tournament.CategoryId -> TournamentCategory.Id (colonne Type = niveau)
+	function getTournCategoryJoin(s) {
+	  const tcTables = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='TournamentCategory'").get();
+	  if (tcTables) {
+		const tcCols = s.prepare('PRAGMA table_info(TournamentCategory)').all().map(c => c.name);
+		if (tcCols.includes('Type')) return { sel: 'tc.Type AS Category', join: 'LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId', ord: 'tc.Type ASC,' };
+	  }
+	  // Fallback : cherche une colonne directe sur Tournament
+	  const tCols = s.prepare('PRAGMA table_info(Tournament)').all().map(c => c.name);
+	  console.log('[Palmares] Colonnes Tournament:', tCols.join(', '));
+	  for (const c of ['CategoryId', 'Category', 'Type', 'TournamentType', 'Kind', 'Level']) {
+		if (tCols.includes(c)) return { sel: `t.${c} AS Category`, join: '', ord: `t.${c} ASC,` };
+	  }
+	  return { sel: 'NULL AS Category', join: '', ord: '' };
+	}
+
 	// Palmarès filtré par catégorie (Grand Chelem, Masters 1000, etc.)
 	function getTmPalmares(tmId) {
 	  const s = openSaveDb();
 	  if (!s) return null;
 	  try {
+		const { sel: catSel, join: catJoin, ord: catOrd } = getTournCategoryJoin(s);
+
 		const titles = s.prepare(`
-		  SELECT t.Name, t.Category, tr.Year, tr.MoneyWon, tr.RoundReached
-		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  SELECT t.Name, ${catSel}, tr.Year, tr.MoneyWon, tr.RoundReached
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  ${catJoin}
 		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
-		  ORDER BY t.Category ASC, tr.Year DESC
+		  ORDER BY ${catOrd} tr.Year DESC
 		`).all(tmId);
 
 		const finals = s.prepare(`
-		  SELECT t.Name, t.Category, tr.Year, tr.RoundReached
-		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  SELECT t.Name, ${catSel}, tr.Year, tr.RoundReached
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  ${catJoin}
 		  WHERE tr.PlayerId=? AND tr.RoundReached=0
-		  ORDER BY t.Category ASC, tr.Year DESC
+		  ORDER BY ${catOrd} tr.Year DESC
 		`).all(tmId);
 
-		// SF et QF aussi
 		const sf = s.prepare(`
-		  SELECT t.Name, t.Category, tr.Year, tr.RoundReached
-		  FROM TournamentResult tr JOIN Tournament t ON t.Id=tr.TournamentId
+		  SELECT t.Name, ${catSel}, tr.Year, tr.RoundReached
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  ${catJoin}
 		  WHERE tr.PlayerId=? AND tr.RoundReached=1
-		  ORDER BY t.Category ASC, tr.Year DESC
+		  ORDER BY ${catOrd} tr.Year DESC
 		`).all(tmId);
 
-		// Grouper les titres par catégorie
 		const byCategory = {};
 		for (const r of titles) {
 		  const cat = r.Category ?? 3;
@@ -838,26 +864,63 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  return embed;
 	}
 
-	function buildClassementEmbed(rows) {
+	function buildClassementEmbed(rows, page, simuPlayers) {
+	  const pageSize = 20;
+	  const start = page * pageSize;
+	  const slice = rows.slice(start, start + pageSize);
+	  const total = rows.length;
+
 	  const embed = new EmbedBuilder()
 		.setColor(COLOR.tennis)
-		.setTitle('🌍 Classement ATP — Top 20')
-		.setFooter({ text: 'Tennis Manager 2026 — Classement' })
+		.setTitle(`🌍 Classement ATP — #${start + 1} à #${Math.min(start + pageSize, total)}`)
+		.setFooter({ text: `Tennis Manager 2026 — Classement · ${total} joueurs actifs` })
 		.setTimestamp();
 
-	  if (!rows.length) {
+	  if (!slice.length) {
 		embed.setDescription('*Classement non disponible.*');
 		return embed;
 	  }
 
 	  const medals = ['🥇', '🥈', '🥉'];
-	  const lines = rows.map((r, i) => {
-		const prefix = medals[i] ?? `**${r.Rank}.**`;
-		return `${prefix} ${r.Firstname} ${r.Lastname} (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
+	  const lines = slice.map((r) => {
+		const pos = r.Rank ?? (start + slice.indexOf(r) + 1);
+		const prefix = page === 0 && pos <= 3 ? medals[pos - 1] : `\`#${pos}\``;
+		return `${prefix} **${r.Firstname} ${r.Lastname}** (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
 	  }).join('\n');
 
 	  embed.setDescription(lines);
+
+	  // Section joueurs de la simulation
+	  if (simuPlayers && simuPlayers.length) {
+		const simuLines = simuPlayers.map(sp => {
+		  const rankStr = sp.rank != null ? `\`#${sp.rank}\`` : '`non classé`';
+		  return `${rankStr} **${sp.ingame_name}** — ${(sp.points ?? 0).toLocaleString()} pts`;
+		}).join('\n');
+		embed.addFields({ name: '🎮 Joueurs de la simulation', value: simuLines });
+	  }
+
 	  return embed;
+	}
+
+	function buildClassementComponents(page, totalRows) {
+	  const pageSize = 20;
+	  const maxPage = Math.ceil(totalRows / pageSize) - 1;
+	  const prev = new ButtonBuilder()
+		.setCustomId(`classement_page:${page - 1}`)
+		.setLabel('◀️ Précédent')
+		.setStyle(ButtonStyle.Secondary)
+		.setDisabled(page <= 0);
+	  const next = new ButtonBuilder()
+		.setCustomId(`classement_page:${page + 1}`)
+		.setLabel('Suivant ▶️')
+		.setStyle(ButtonStyle.Secondary)
+		.setDisabled(page >= maxPage);
+	  const info = new ButtonBuilder()
+		.setCustomId('classement_info')
+		.setLabel(`Page ${page + 1} / ${maxPage + 1}`)
+		.setStyle(ButtonStyle.Primary)
+		.setDisabled(true);
+	  return [new ActionRowBuilder().addComponents(prev, info, next)];
 	}
 
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -1281,8 +1344,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!seasonDbReady)
 		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
-		const rows = getTmClassement(20);
-		return interaction.editReply({ embeds: [buildClassementEmbed(rows)] });
+		const rows = getTmClassement(500);
+		const { data: simuRaw } = await supabase.from('players').select('ingame_name, tm_player_id').not('tm_player_id', 'is', null);
+		const simuPlayers = (simuRaw ?? []).map(sp => {
+		  const tmRow = rows.find(r => r.Id === sp.tm_player_id);
+		  return { ingame_name: sp.ingame_name, rank: tmRow?.Rank ?? null, points: tmRow?.Points ?? 0 };
+		}).sort((a, b) => (a.rank ?? 9999) - (b.rank ?? 9999));
+		return interaction.editReply({
+		  embeds: [buildClassementEmbed(rows, 0, simuPlayers)],
+		  components: buildClassementComponents(0, rows.length),
+		});
 	  }
 
 	  // ── /admin ────────────────────────────────────────────────────────────────────
@@ -2243,7 +2314,33 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		return interaction.update({ content: '✅ Ton joueur a été créé avec succès !', embeds: [], components: [] });
 	  });
 
-	  // ── Commandes slash (existant) ────────────────────────────────────────────────
+	  // ── Boutons pagination classement ──────────────────────────────────────────────
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('classement_page:')) return;
+
+		const page = parseInt(interaction.customId.split(':')[1], 10);
+		if (isNaN(page) || page < 0) return;
+
+		await interaction.deferUpdate();
+
+		if (!seasonDbReady)
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')], components: [] });
+
+		const rows = getTmClassement(500);
+		const { data: simuRaw } = await supabase.from('players').select('ingame_name, tm_player_id').not('tm_player_id', 'is', null);
+		const simuPlayers = (simuRaw ?? []).map(sp => {
+		  const tmRow = rows.find(r => r.Id === sp.tm_player_id);
+		  return { ingame_name: sp.ingame_name, rank: tmRow?.Rank ?? null, points: tmRow?.Points ?? 0 };
+		}).sort((a, b) => (a.rank ?? 9999) - (b.rank ?? 9999));
+
+		return interaction.editReply({
+		  embeds: [buildClassementEmbed(rows, page, simuPlayers)],
+		  components: buildClassementComponents(page, rows.length),
+		});
+	  });
+
+	  	  // ── Commandes slash (existant) ────────────────────────────────────────────────
 	  client.on('interactionCreate', async (interaction) => {
 		if (!interaction.isChatInputCommand()) return;
 		console.log(`[Cmd] /${interaction.commandName} par ${interaction.user.tag} (${interaction.user.id})`);
