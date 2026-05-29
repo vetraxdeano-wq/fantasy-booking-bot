@@ -214,6 +214,149 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  },
 	};
 
+	// ── Barème de récompenses par résultat tournoi ──────────────────────────────
+	// Clé = TournamentCategoryId (= tc.Type dans la DB)
+	// RoundReached : -1=titre, 0=finale, 1=demi-finale
+	const REWARD_TABLE = {
+	  // catId : { [-1]: titre, [0]: finale, [1]: demi }
+	  1:  { '-1': 1000, '0': 400,  '1': 150 }, // Grand Chelem
+	  2:  { '-1': 600,  '0': 250,  '1': 80  }, // Masters 1000
+	  3:  { '-1': 300,  '0': 100,  '1': 30  }, // ATP 500
+	  5:  { '-1': 150,  '0': 50               }, // ATP 250
+	  16: { '-1': 500,  '0': 200,  '1': 60  }, // Masters Cup / Next Gen
+	};
+	// Noms lisibles pour les notifications
+	const REWARD_CAT_LABEL = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 16: 'Masters Cup' };
+	const REWARD_ROUND_LABEL = { '-1': '🏆 Titre', '0': '🥈 Finale', '1': '🥉 Demi-finale' };
+
+	// Vérifie les nouveaux résultats depuis le dernier reload et distribue les coins
+	// Stocke les résultats déjà récompensés dans Supabase (colonne rewarded_results jsonb)
+	async function checkAndRewardResults(logChannel) {
+	  if (!seasonDbReady) return;
+	  const s = openSaveDb();
+	  if (!s) return;
+
+	  // Récupérer tous les joueurs linkés
+	  const { data: players } = await supabase.from('players')
+		.select('discord_id, tm_player_id, ingame_name, rewarded_results')
+		.not('tm_player_id', 'is', null);
+	  if (!players?.length) return;
+
+	  const notifications = [];
+
+	  for (const player of players) {
+		const tmId = player.tm_player_id;
+		// Résultats éligibles (titre/finale/demi dans catégories récompensées)
+		const results = s.prepare(\`
+		  SELECT tr.TournamentId, tr.TournamentCategoryId, tr.Year, tr.RoundReached, t.Name
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  WHERE tr.PlayerId = ?
+		    AND tr.TournamentCategoryId IN (1,2,3,5,16)
+		    AND tr.RoundReached IN (-1, 0, 1)
+		  ORDER BY tr.Year ASC, tr.TournamentId ASC
+		\`).all(tmId);
+
+		const already = new Set(player.rewarded_results ?? []);
+		const newRewarded = [];
+		let totalGain = 0;
+		const lines = [];
+
+		for (const r of results) {
+		  const key = \`\${r.TournamentId}-\${r.Year}-\${r.RoundReached}\`;
+		  if (already.has(key)) continue;
+		  const catRewards = REWARD_TABLE[r.TournamentCategoryId];
+		  if (!catRewards) continue;
+		  const coins = catRewards[String(r.RoundReached)];
+		  if (!coins) continue;
+
+		  totalGain += coins;
+		  newRewarded.push(key);
+		  const catLabel   = REWARD_CAT_LABEL[r.TournamentCategoryId] ?? '?';
+		  const roundLabel = REWARD_ROUND_LABEL[String(r.RoundReached)] ?? '?';
+		  lines.push(\`\${roundLabel} \${r.Name} (\${r.Year}) [**\${catLabel}**] → **+\${coins} 🪙**\`);
+		}
+
+		if (!newRewarded.length) continue;
+
+		// Créditer + sauvegarder les clés récompensées
+		await db.addCoins(player.discord_id, totalGain, \`Récompenses tournois (reload)\`);
+		const allRewarded = [...already, ...newRewarded];
+		await supabase.from('players').update({ rewarded_results: allRewarded }).eq('discord_id', player.discord_id);
+
+		notifications.push({ discordId: player.discord_id, name: player.ingame_name, total: totalGain, lines });
+	  }
+
+	  // ── Récompenses classement final de saison ────────────────────────────────
+	  // Barème : top 1→500 🪙, top 3→300, top 10→150, top 20→75, top 50→40, top 100→20
+	  const RANK_REWARDS = [
+		{ max: 0,   coins: 500, label: '🥇 #1 mondial' },
+		{ max: 2,   coins: 300, label: '🥈 Top 3' },
+		{ max: 9,   coins: 150, label: '🏅 Top 10' },
+		{ max: 19,  coins: 75,  label: '🎯 Top 20' },
+		{ max: 49,  coins: 40,  label: '📈 Top 50' },
+		{ max: 99,  coins: 20,  label: '📊 Top 100' },
+	  ];
+
+	  // Pour chaque année disponible dans le classement final
+	  const seasonDates = s.prepare(\`
+		SELECT strftime('%Y', Date, 'unixepoch') AS year, MAX(Date) AS maxDate
+		FROM Ranking WHERE Circuit=0
+		GROUP BY year ORDER BY year ASC
+	  \`).all();
+
+	  for (const player of players) {
+		const tmId   = player.tm_player_id;
+		const already = new Set(player.rewarded_results ?? []);
+
+		for (const { year, maxDate } of seasonDates) {
+		  const rKey = \`ranking-\${year}-\${player.discord_id}\`;
+		  if (already.has(rKey)) continue;
+
+		  const row = s.prepare(\`
+			SELECT Rank FROM Ranking
+			WHERE PlayerId=? AND Circuit=0 AND Date=?
+		  \`).get(tmId, maxDate);
+		  if (!row) continue;
+
+		  const tier = RANK_REWARDS.find(t => row.Rank <= t.max);
+		  if (!tier) continue;
+
+		  await db.addCoins(player.discord_id, tier.coins, \`Classement final \${year} (\${tier.label})\`);
+		  await supabase.from('players')
+			.update({ rewarded_results: [...already, rKey] })
+			.eq('discord_id', player.discord_id);
+		  already.add(rKey);
+
+		  // Ajouter à la notification existante ou créer une nouvelle
+		  let notif = notifications.find(n => n.discordId === player.discord_id);
+		  if (!notif) {
+			notif = { discordId: player.discord_id, name: player.ingame_name, total: 0, lines: [] };
+			notifications.push(notif);
+		  }
+		  notif.total += tier.coins;
+		  notif.lines.push(\`\${tier.label} ATP \${year} → **+\${tier.coins} 🪙**\`);
+		}
+	  }
+
+	  // Poster les notifications dans le channel si fourni
+	  if (logChannel && notifications.length) {
+		for (const notif of notifications) {
+		  const embed = new EmbedBuilder()
+			.setColor(COLOR.gold)
+			.setTitle(\`🎾 Nouvelles récompenses — \${notif.name}\`)
+			.setDescription(notif.lines.join('\n'))
+			.addFields({ name: '💰 Total crédité', value: \`**+\${notif.total.toLocaleString()} 🪙**\` })
+			.setFooter({ text: 'Récompenses automatiques — reload save.db' })
+			.setTimestamp();
+		  try { await logChannel.send({ content: \`<@\${notif.discordId}>\`, embeds: [embed] }); }
+		  catch (e) { console.error('[Rewards] Erreur envoi notif:', e.message); }
+		}
+	  }
+
+	  return notifications;
+	}
+
 	// ══════════════════════════════════════════════════════════════════════════════
 	//  LECTURE DU SAVE.DB (Tennis Manager 2026)
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -363,6 +506,37 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥇', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
 	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2)
 	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'M1000', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
+
+	// ── Économie & Shop ──────────────────────────────────────────────────────────
+	// Boosts : +2 max par stat, plafond absolu 18
+	const BOOST_MAX_PER_STAT = 2;
+	const BOOST_ABS_CAP      = 18;
+	// Coût pour passer d'une valeur v à v+1 (exponentiel : coûteux à haut niveau)
+	// v=10→11: 200🪙 | v=14→15: 800🪙 | v=16→17: 1800🪙 | v=17→18: 3000🪙
+	function boostCost(currentVal) {
+	  if (currentVal >= BOOST_ABS_CAP) return Infinity;
+	  return Math.round(50 * Math.pow(1.55, currentVal - 8));
+	}
+	// Liste des stats boostables (clé TM → label court)
+	const BOOSTABLE_STATS = [
+	  ['ServePower','Puissance service'],['ServeSpin','Spin service'],['ServeConsistency','Consistance service'],
+	  ['Forehand','Coup droit'],['ForehandConsistency','CD consistance'],['Backhand','Revers'],['BackhandConsistency','RV consistance'],
+	  ['Return','Retour'],['Counter','Counter'],['Topspin','Topspin'],['Underspin','Slice'],['Dropshot','Amorti'],
+	  ['Control','Contrôle'],['Timing','Timing'],
+	  ['Speed','Vitesse'],['Footwork','Déplacement'],['Balance','Équilibre'],['Agility','Agilité'],['Fitness','Condition'],['Stamina','Endurance'],
+	  ['Anticipation','Anticipation'],['Focus','Concentration'],['Composure','Sang-froid'],['KillerInstinct','Instinct'],['FightingSpirit','Combativité'],['Tactical','Tactique'],
+	  ['Volley','Volée'],
+	];
+	// Supabase helpers pour boosts
+	const shopDb = {
+	  getBoosts: async (discordId) => {
+		const { data } = await supabase.from('players').select('boosts').eq('discord_id', discordId).single();
+		return data?.boosts ?? {};
+	  },
+	  applyBoost: async (discordId, statKey, newBoosts) => {
+		await supabase.from('players').update({ boosts: newBoosts }).eq('discord_id', discordId);
+	  },
+	};
 
 	function getTmPlayerByName(query) {
 	  const s = openSaveDb();
@@ -703,7 +877,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  return embed;
 	}
 
-	function buildAttributesEmbed(player, p, avatarUrl) {
+	function buildAttributesEmbed(player, p, avatarUrl, boosts = {}) {
 	  const embed = new EmbedBuilder()
 		.setColor(COLOR.purple)
 		.setTitle(`📋 Attributs — ${p.Firstname} ${p.Lastname}`)
@@ -714,12 +888,20 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  if (avatarUrl) embed.setThumbnail(avatarUrl);
 
 	  // Calcul de la moyenne globale
-	  const allAttrs = Object.values(ATTR_GROUPS).flat().map(([key]) => p[key] ?? 0);
+	  const allAttrs = Object.values(ATTR_GROUPS).flat().map(([key]) => {
+		const boosted = boosts[key] ?? 0;
+		return Math.min((p[key] ?? 0) + boosted, BOOST_ABS_CAP);
+	  });
 	  const avg = (allAttrs.reduce((a, b) => a + b, 0) / allAttrs.length).toFixed(1);
 	  embed.addFields({ name: '⚖️ Moyenne globale', value: `**${avg}/20**` });
 
 	  for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
-		const lines = attrs.map(([key, label]) => `\`${label.padEnd(20)}\` ${attrBar(p[key])}`).join('\n');
+		const lines = attrs.map(([key, label]) => {
+		const boosted  = boosts[key] ?? 0;
+		const val      = Math.min((p[key] ?? 0) + boosted, BOOST_ABS_CAP);
+		const boostTag = boosted > 0 ? ` ⬆+${boosted}` : '';
+		return \`\\`${label.padEnd(20)}\\` ${attrBar(val)}${boostTag}\`;
+	  }).join('\n');
 		embed.addFields({ name: groupName, value: lines, inline: false });
 	  }
 
@@ -979,6 +1161,19 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.setDescription('Classement ATP mondial du save.db (Top 20)'),
 
 	  new SlashCommandBuilder()
+		.setName('shop')
+		.setDescription('Voir le shop : coûts des boosts pour chaque attribut'),
+
+	  new SlashCommandBuilder()
+		.setName('boost')
+		.setDescription('Améliorer un attribut de ton joueur TM2026 (coûte des coins)')
+		.addStringOption(o =>
+		  o.setName('stat')
+		   .setDescription('Attribut à booster')
+		   .setRequired(true)
+		   .addChoices(...BOOSTABLE_STATS.map(([k,l]) => ({ name: l, value: k })))),
+
+	  new SlashCommandBuilder()
 		.setName('admin')
 		.setDescription('Commandes admin')
 		.setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
@@ -997,6 +1192,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.addSubcommand(s => s
 		  .setName('reload_db')
 		  .setDescription('Force le rechargement du save.db depuis Supabase'))
+		.addSubcommand(s => s
+		  .setName('check_rewards')
+		  .setDescription('Distribue manuellement les récompenses tournois sans reload du save.db'))
 		.addSubcommand(s => s
 		  .setName('info_db')
 		  .setDescription('Infos sur le save.db actuellement chargé')),
@@ -1232,7 +1430,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!p) return interaction.editReply({ embeds: [err('Joueur TM introuvable dans le save.db.')] });
 
 		return interaction.editReply({
-		  embeds: [buildAttributesEmbed(player, p, target.displayAvatarURL({ dynamic: true }))]
+		  embeds: [buildAttributesEmbed(player, p, target.displayAvatarURL({ dynamic: true }), await shopDb.getBoosts(interaction.user.id))]
 		});
 	  }
 
@@ -1354,6 +1552,103 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  }
 
 	  // ── /admin ────────────────────────────────────────────────────────────────────
+	  // ── /shop ──────────────────────────────────────────────────────────────────
+	  if (cmd === 'shop') {
+		const player = await db.get(interaction.user.id);
+		if (!player) return interaction.reply({ embeds: [err('Tu n\'as pas de compte. Utilise `/creer-joueur`.')], ephemeral: true });
+		if (!player.tm_player_id) return interaction.reply({ embeds: [err('Ton compte n\'est pas lié à un joueur TM2026. Utilise `/link`.')], ephemeral: true });
+		const s = openSaveDb();
+		if (!s) return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		const p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(player.tm_player_id);
+		if (!p) return interaction.reply({ embeds: [err('Joueur TM introuvable.')], ephemeral: true });
+		const boosts = await shopDb.getBoosts(interaction.user.id);
+
+		const embed = new EmbedBuilder()
+		  .setColor(COLOR.gold)
+		  .setTitle(`🛒 Shop — ${player.ingame_name}`)
+		  .setDescription(
+			`Solde : **${player.coins.toLocaleString()} 🪙** | Plafond : **18/20** | Max par stat : **+${BOOST_MAX_PER_STAT}**\n` +
+			`Utilisez \`/boost <stat>\` pour acheter un boost.\n` +
+			`Les valeurs affichées incluent déjà vos boosts actifs.`
+		  )
+		  .setFooter({ text: 'Coût exponentiel — plus la stat est haute, plus c\'est cher' });
+
+		// Grouper par catégorie pour la lisibilité
+		const groups = {
+		  '🎾 Service':     ['ServePower','ServeSpin','ServeConsistency'],
+		  '🎯 Fond de court': ['Forehand','ForehandConsistency','Backhand','BackhandConsistency','Return','Counter','Topspin','Underspin','Dropshot','Control','Timing'],
+		  '🏃 Physique':    ['Speed','Footwork','Balance','Agility','Fitness','Stamina'],
+		  '🧠 Mental':      ['Anticipation','Focus','Composure','KillerInstinct','FightingSpirit','Tactical'],
+		  '🏅 Autre':       ['Volley'],
+		};
+		const labelOf = Object.fromEntries(BOOSTABLE_STATS);
+
+		for (const [grpName, keys] of Object.entries(groups)) {
+		  const lines = keys.map(k => {
+			const used    = boosts[k] ?? 0;
+			const baseVal = p[k] ?? 0;
+			const curVal  = Math.min(baseVal + used, BOOST_ABS_CAP);
+			const canBoost = used < BOOST_MAX_PER_STAT && curVal < BOOST_ABS_CAP;
+			const cost    = canBoost ? boostCost(curVal).toLocaleString() + ' 🪙' : (curVal >= BOOST_ABS_CAP ? '🔒 plafond 18' : '🔒 +2 max atteint');
+			const boostedTag = used > 0 ? \` (+\${used})\` : '';
+			return \`\\`\${(labelOf[k] ?? k).padEnd(20)}\\` \${curVal.toFixed(1)}\${boostedTag}/20 → \${cost}\`;
+		  }).join('\n');
+		  embed.addFields({ name: grpName, value: lines });
+		}
+
+		return interaction.reply({ embeds: [embed], ephemeral: true });
+	  }
+
+	  // ── /boost ─────────────────────────────────────────────────────────────────
+	  if (cmd === 'boost') {
+		const player = await db.get(interaction.user.id);
+		if (!player) return interaction.reply({ embeds: [err('Tu n\'as pas de compte.')], ephemeral: true });
+		if (!player.tm_player_id) return interaction.reply({ embeds: [err('Compte non lié. Utilise `/link`.')], ephemeral: true });
+		const statKey = interaction.options.getString('stat');
+		const statDef = BOOSTABLE_STATS.find(([k]) => k === statKey);
+		if (!statDef) return interaction.reply({ embeds: [err('Stat inconnue.')], ephemeral: true });
+		const [, statLabel] = statDef;
+
+		const s = openSaveDb();
+		if (!s) return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+		const p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(player.tm_player_id);
+		if (!p) return interaction.reply({ embeds: [err('Joueur TM introuvable.')], ephemeral: true });
+
+		const boosts  = await shopDb.getBoosts(interaction.user.id);
+		const used    = boosts[statKey] ?? 0;
+		const baseVal = p[statKey] ?? 0;
+		const curVal  = Math.min(baseVal + used, BOOST_ABS_CAP);
+
+		if (used >= BOOST_MAX_PER_STAT)
+		  return interaction.reply({ embeds: [err(\`**\${statLabel}** : tu as déjà utilisé tes \${BOOST_MAX_PER_STAT} boosts sur cette stat.\`)], ephemeral: true });
+		if (curVal >= BOOST_ABS_CAP)
+		  return interaction.reply({ embeds: [err(\`**\${statLabel}** est déjà au plafond (18).\`)], ephemeral: true });
+
+		const cost = boostCost(curVal);
+		if (player.coins < cost)
+		  return interaction.reply({ embeds: [err(\`Solde insuffisant. Ce boost coûte **\${cost.toLocaleString()} 🪙**, tu as **\${player.coins.toLocaleString()} 🪙**.\`)], ephemeral: true });
+
+		// Débit + sauvegarde boost
+		const ok2 = await db.removeCoins(interaction.user.id, cost, \`Boost \${statLabel} \${curVal.toFixed(1)}→\${(curVal+1).toFixed(1)}\`);
+		if (!ok2) return interaction.reply({ embeds: [err('Erreur lors du paiement.')], ephemeral: true });
+
+		const newBoosts = { ...boosts, [statKey]: used + 1 };
+		await shopDb.applyBoost(interaction.user.id, statKey, newBoosts);
+
+		const embed = new EmbedBuilder()
+		  .setColor(COLOR.green)
+		  .setTitle('✅ Boost appliqué !')
+		  .setDescription(
+			\`**\${statLabel}** : \${curVal.toFixed(1)} → **\${(curVal + 1).toFixed(1)}** (+1)\n\` +
+			\`Coût : **-\${cost.toLocaleString()} 🪙**\n\` +
+			\`Boosts restants sur cette stat : **\${BOOST_MAX_PER_STAT - used - 1}**\n\` +
+			\`Nouveau solde : **\${(player.coins - cost).toLocaleString()} 🪙**\`
+		  )
+		  .setFooter({ text: 'Les boosts sont permanents et visibles dans /attributs' });
+
+		return interaction.reply({ embeds: [embed] });
+	  }
+
 	  if (cmd === 'admin') {
 		const sub = interaction.options.getSubcommand();
 
@@ -1382,6 +1677,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			await supabaseDownload();
 			seasonDbReady = true;
 			const info = getSaveDbInfo();
+			// Distribuer les récompenses tournois automatiquement
+			try {
+			  const rewarded = await checkAndRewardResults(interaction.channel);
+			  if (rewarded?.length) console.log(`[Rewards] ${rewarded.length} joueur(s) récompensé(s) après reload`);
+			} catch(re) { console.error('[Rewards] Erreur:', re.message); }
 			return interaction.editReply({ embeds: [ok('Save.db rechargé !',
 			  info
 				? `📅 Date : **${info.date}** | 👤 **${info.mainPlayer}** | 📦 **${info.size} Mo**`
@@ -1389,6 +1689,19 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			)]});
 		  } catch (e) {
 			return interaction.editReply({ embeds: [err(`Échec du rechargement : ${e.message}`)] });
+		  }
+		}
+
+		if (sub === 'check_rewards') {
+		  await interaction.deferReply({ ephemeral: false });
+		  try {
+			const rewarded = await checkAndRewardResults(interaction.channel);
+			if (!rewarded?.length)
+			  return interaction.editReply({ embeds: [ok('Récompenses vérifiées', 'Aucun nouveau résultat à récompenser.')] });
+			const summary = rewarded.map(n => `• **\${n.name}** : +\${n.total.toLocaleString()} 🪙`).join('\n');
+			return interaction.editReply({ embeds: [ok(\`✅ \${rewarded.length} joueur(s) récompensé(s)\`, summary)] });
+		  } catch(e) {
+			return interaction.editReply({ embeds: [err(\`Erreur : \${e.message}\`)] });
 		  }
 		}
 
