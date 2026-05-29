@@ -1573,8 +1573,27 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		cjSessions.set(interaction.user.id, { ...sess9, taille, poids });
 
-		// Modal attributs techniques — 15 stats en 3 modales (max 5 inputs par modal Discord)
-		// On ouvre la première des trois modales chaînées
+		// Discord interdit d'ouvrir un modal depuis un ModalSubmit.
+		// On envoie un message éphémère avec un bouton intermédiaire.
+		const btnAttr1 = new ButtonBuilder()
+		  .setCustomId(`cj_open_attr1:${interaction.user.id}`)
+		  .setLabel('➡️ Renseigner les attributs (1/3)')
+		  .setStyle(ButtonStyle.Primary);
+		return interaction.reply({
+		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Taille et poids enregistrés !\nClique sur le bouton ci-dessous pour saisir tes attributs techniques.')],
+		  components: [new ActionRowBuilder().addComponents(btnAttr1)],
+		  ephemeral: true,
+		});
+	  });
+
+	  // Étape 9b : bouton intermédiaire → ouvre le modal attrs 1/3
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('cj_open_attr1:')) return;
+
+		const userId9b = interaction.customId.split(':')[1];
+		if (interaction.user.id !== userId9b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
+
 		const attrModal1 = new ModalBuilder()
 		  .setCustomId(`cj_attr1:${interaction.user.id}`)
 		  .setTitle('Attributs (1/3) — 180 pts, max 20/stat');
