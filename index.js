@@ -183,6 +183,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  discord_id: p.discordId, username: p.username, ingame_name: p.ingameName,
 		  nationality: p.nationality, playstyle: p.playstyle, coins: 500,
 		  trait1: p.trait1 ?? null, trait2: p.trait2 ?? null, trait3: p.trait3 ?? null,
+		  tac1: p.tac1 ?? null, tac2: p.tac2 ?? null, tac3: p.tac3 ?? null,
 		});
 	  },
 	  delete: async (id) => {
@@ -2022,37 +2023,158 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  return interaction.reply({ embeds: [err('Ténacité invalide. Relance `/creer-joueur`.')], ephemeral: true });
 
 		const mentalAttrs = { ...sess14b.m1, tenacite: sess14b.tenaciteNeeded };
+		cjSessions.set(interaction.user.id, { ...sess14b, mentalAttrs });
 
-		const allAttrs = { ...sess14b.a1, ...sess14b.a2, ...sess14b.a3 };
+		// → Passer aux tactiques
+		const TACTIQUES = [
+		  { label: '🌍 Jeu tout-terrain',                   value: 'Jeu tout-terrain',                   description: 'Polyvalent, s\'adapte à tout' },
+		  { label: '🎯 Fond de court offensif',             value: 'Jeu de fond de court offensif',      description: 'Frappe fort depuis le fond' },
+		  { label: '⚔️ Jeu d\'attaque',                    value: 'Jeu d\'attaque',                     description: 'Cherche le filet et l\'offensive' },
+		  { label: '🛡️ Défensif fond de court',            value: 'Jeu défensif fond de court',         description: 'Construit sur la solidité et la patience' },
+		  { label: '🔄 Contre-attaque',                    value: 'Jeu basé sur la contre-attaque',     description: 'Retourne la pression adverse' },
+		  { label: '💪 Fond de court solide',               value: 'Jeu solide fond de court',           description: 'Régularité et efficacité sans failles' },
+		  { label: '🧩 Jeu tactique varié',                 value: 'Jeu tactique varié',                 description: 'Déroute l\'adversaire par la variation' },
+		  { label: '🎾 Service-volée',                      value: 'Service-volée',                      description: 'Monte au filet dès le service' },
+		  { label: '💥 Gros service',                       value: 'Jeu basé sur un gros service',       description: 'Le service comme arme principale' },
+		];
+
+		const tac1Select = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_tac1:${interaction.user.id}`)
+		  .setPlaceholder('Tactique principale')
+		  .addOptions(TACTIQUES);
+
+		return interaction.reply({
+		  ephemeral: true,
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Tactiques (1/3)')
+			.setDescription(
+			  `**${sess14b.n}** · 🌍 ${sess14b.p}\n\n` +
+			  `✅ Stats mentales confirmées !\n\n` +
+			  `**Choisis ta tactique principale :**\n> C'est ton style de jeu dominant, celui que tu pratiques le plus naturellement.`
+			)],
+		  components: [new ActionRowBuilder().addComponents(tac1Select)],
+		});
+	  });
+
+	  // ─── TACTIQUES ────────────────────────────────────────────────────────────────
+
+	  const TACTIQUES_ALL = [
+		{ label: '🌍 Jeu tout-terrain',        value: 'Jeu tout-terrain',                description: 'Polyvalent, s\'adapte à tout' },
+		{ label: '🎯 Fond de court offensif',  value: 'Jeu de fond de court offensif',   description: 'Frappe fort depuis le fond' },
+		{ label: '⚔️ Jeu d\'attaque',         value: 'Jeu d\'attaque',                  description: 'Cherche le filet et l\'offensive' },
+		{ label: '🛡️ Défensif fond de court', value: 'Jeu défensif fond de court',      description: 'Construit sur la solidité et la patience' },
+		{ label: '🔄 Contre-attaque',         value: 'Jeu basé sur la contre-attaque',  description: 'Retourne la pression adverse' },
+		{ label: '💪 Fond de court solide',    value: 'Jeu solide fond de court',        description: 'Régularité et efficacité sans failles' },
+		{ label: '🧩 Jeu tactique varié',      value: 'Jeu tactique varié',              description: 'Déroute l\'adversaire par la variation' },
+		{ label: '🎾 Service-volée',           value: 'Service-volée',                   description: 'Monte au filet dès le service' },
+		{ label: '💥 Gros service',            value: 'Jeu basé sur un gros service',    description: 'Le service comme arme principale' },
+	  ];
+
+	  // Étape 15a : tactique principale choisie → sélecteur tactique secondaire
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_tac1:')) return;
+
+		const userId15a = interaction.customId.split(':')[1];
+		const sess15a = cjSessions.get(userId15a) ?? cjSessions.get(interaction.user.id);
+		if (!sess15a) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
+
+		const tac1 = interaction.values[0];
+		cjSessions.set(interaction.user.id, { ...sess15a, tac1 });
+
+		const tac2Select = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_tac2:${interaction.user.id}`)
+		  .setPlaceholder('Tactique secondaire')
+		  .addOptions(TACTIQUES_ALL.filter(t => t.value !== tac1));
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Tactiques (2/3)')
+			.setDescription(
+			  `**${sess15a.n}** · 🌍 ${sess15a.p}\n\n` +
+			  `✅ Principale : **${tac1}**\n\n` +
+			  `**Choisis ta tactique secondaire :**\n> Ton plan B, celui que tu alternes selon la situation.`
+			)],
+		  components: [new ActionRowBuilder().addComponents(tac2Select)],
+		});
+	  });
+
+	  // Étape 15b : tactique secondaire choisie → sélecteur troisième tactique
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_tac2:')) return;
+
+		const userId15b = interaction.customId.split(':')[1];
+		const sess15b = cjSessions.get(userId15b) ?? cjSessions.get(interaction.user.id);
+		if (!sess15b) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
+
+		const tac2 = interaction.values[0];
+		cjSessions.set(interaction.user.id, { ...sess15b, tac2 });
+
+		const tac3Select = new StringSelectMenuBuilder()
+		  .setCustomId(`cj_tac3:${interaction.user.id}`)
+		  .setPlaceholder('Troisième tactique')
+		  .addOptions(TACTIQUES_ALL.filter(t => t.value !== sess15b.tac1 && t.value !== tac2));
+
+		return interaction.update({
+		  embeds: [new EmbedBuilder().setColor(COLOR.tennis)
+			.setTitle('🎾 Créer ton joueur — Tactiques (3/3)')
+			.setDescription(
+			  `**${sess15b.n}** · 🌍 ${sess15b.p}\n\n` +
+			  `✅ Principale : **${sess15b.tac1}**\n` +
+			  `✅ Secondaire : **${tac2}**\n\n` +
+			  `**Choisis ta troisième tactique :**\n> Ton option de repli, l'alternative ultime.`
+			)],
+		  components: [new ActionRowBuilder().addComponents(tac3Select)],
+		});
+	  });
+
+	  // Étape 16 : troisième tactique choisie → création du joueur
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isStringSelectMenu()) return;
+		if (!interaction.customId.startsWith('cj_tac3:')) return;
+
+		const userId16 = interaction.customId.split(':')[1];
+		const sess16 = cjSessions.get(userId16) ?? cjSessions.get(interaction.user.id);
+		if (!sess16) return interaction.update({ embeds: [err('Session expirée, relance `/creer-joueur`.')], components: [] });
+
+		const tac3 = interaction.values[0];
+
+		const allAttrs = { ...sess16.a1, ...sess16.a2, ...sess16.a3 };
 		const totalTech = Object.values(allAttrs).reduce((s, v) => s + v, 0);
-		const physAttrs = sess14b.physAttrs;
+		const physAttrs = sess16.physAttrs;
+		const mentalAttrs = sess16.mentalAttrs;
 
 		cjSessions.delete(interaction.user.id);
 
 		// Vérifications finales
 		if (await db.exists(interaction.user.id))
-		  return interaction.reply({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], ephemeral: true });
-		if (await db.nameTaken(sess14b.n))
-		  return interaction.reply({ embeds: [err(`Le nom **${sess14b.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], ephemeral: true });
+		  return interaction.update({ embeds: [err('Tu as déjà un joueur ! Utilise `/profil`.')], components: [] });
+		if (await db.nameTaken(sess16.n))
+		  return interaction.update({ embeds: [err(`Le nom **${sess16.n}** a été pris entre-temps. Relance \`/creer-joueur\`.`)], components: [] });
 
 		await db.create({
 		  discordId:   interaction.user.id,
 		  username:    interaction.user.username,
-		  ingameName:  sess14b.n,
-		  nationality: sess14b.p,
-		  trait1:      sess14b.t1,
-		  trait2:      sess14b.t2,
-		  trait3:      sess14b.t3,
-		  mainHand:    sess14b.main,
-		  backhand:    sess14b.revers,
-		  taille:      sess14b.taille,
-		  poids:       sess14b.poids,
+		  ingameName:  sess16.n,
+		  nationality: sess16.p,
+		  trait1:      sess16.t1,
+		  trait2:      sess16.t2,
+		  trait3:      sess16.t3,
+		  mainHand:    sess16.main,
+		  backhand:    sess16.revers,
+		  taille:      sess16.taille,
+		  poids:       sess16.poids,
 		  attrs:       allAttrs,
 		  physAttrs:   physAttrs,
 		  mentalAttrs: mentalAttrs,
+		  tac1:        sess16.tac1,
+		  tac2:        sess16.tac2,
+		  tac3:        tac3,
 		});
 
-		const traitsLine = `🧠 **${sess14b.t1}** · **${sess14b.t2}** · **${sess14b.t3}**`;
+		const traitsLine = `🧠 **${sess16.t1}** · **${sess16.t2}** · **${sess16.t3}**`;
+		const tactiquesLine = `🎯 **${sess16.tac1}** (principale) · **${sess16.tac2}** (secondaire) · **${tac3}** (3e)`;
 		const statsBlock =
 		  `🎯 **Service** — Puissance: ${allAttrs.puiss_serv} · Effet: ${allAttrs.effet_serv} · Régularité: ${allAttrs.reg_serv}\n` +
 		  `🏓 **Fond** — CD: ${allAttrs.cd} (rég. ${allAttrs.reg_cd}) · RV: ${allAttrs.revers} (rég. ${allAttrs.reg_rv})\n` +
@@ -2068,15 +2190,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		// Message public dans le canal
 		await interaction.channel.send({
 		  embeds: [ok('Nouveau joueur créé ! 🎾',
-			`Bienvenue <@${interaction.user.id}> — **${sess14b.n}** vient de rejoindre la simulation !\n\n` +
-			`🌍 ${sess14b.p}  —  ${sess14b.main} · Revers ${sess14b.revers}  —  📏 ${sess14b.taille} cm / ⚖️ ${sess14b.poids} kg\n` +
-			`${traitsLine}\n\n` +
+			`Bienvenue <@${interaction.user.id}> — **${sess16.n}** vient de rejoindre la simulation !\n\n` +
+			`🌍 ${sess16.p}  —  ${sess16.main} · Revers ${sess16.revers}  —  📏 ${sess16.taille} cm / ⚖️ ${sess16.poids} kg\n` +
+			`${traitsLine}\n` +
+			`${tactiquesLine}\n\n` +
 			`${statsBlock}\n\n` +
 			`💰 Solde de départ : **500 🪙**`
 		  )],
 		});
 		// Confirmation privée
-		return interaction.reply({ content: '✅ Ton joueur a été créé avec succès !', ephemeral: true });
+		return interaction.update({ content: '✅ Ton joueur a été créé avec succès !', embeds: [], components: [] });
 	  });
 
 	  // ── Commandes slash (existant) ────────────────────────────────────────────────
