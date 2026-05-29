@@ -1627,6 +1627,23 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		}
 		cjSessions.set(interaction.user.id, { ...sess10, a1 });
 
+		const btnAttr2 = new ButtonBuilder()
+		  .setCustomId(`cj_open_attr2:${interaction.user.id}`)
+		  .setLabel('➡️ Attributs techniques (2/3)')
+		  .setStyle(ButtonStyle.Primary);
+		return interaction.reply({
+		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Attributs 1/3 enregistrés !')],
+		  components: [new ActionRowBuilder().addComponents(btnAttr2)],
+		  ephemeral: true,
+		});
+	  });
+
+	  // Étape 10b : bouton → ouvre modal attrs 2/3
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('cj_open_attr2:')) return;
+		const userId10b = interaction.customId.split(':')[1];
+		if (interaction.user.id !== userId10b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const attrModal2 = new ModalBuilder()
 		  .setCustomId(`cj_attr2:${interaction.user.id}`)
 		  .setTitle('Attributs techniques (2/3)');
@@ -1660,6 +1677,23 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		}
 		cjSessions.set(interaction.user.id, { ...sess11, a2 });
 
+		const btnAttr3 = new ButtonBuilder()
+		  .setCustomId(`cj_open_attr3:${interaction.user.id}`)
+		  .setLabel('➡️ Attributs techniques (3/3)')
+		  .setStyle(ButtonStyle.Primary);
+		return interaction.reply({
+		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Attributs 2/3 enregistrés !')],
+		  components: [new ActionRowBuilder().addComponents(btnAttr3)],
+		  ephemeral: true,
+		});
+	  });
+
+	  // Étape 11b : bouton → ouvre modal attrs 3/3
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('cj_open_attr3:')) return;
+		const userId11b = interaction.customId.split(':')[1];
+		if (interaction.user.id !== userId11b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const attrModal3 = new ModalBuilder()
 		  .setCustomId(`cj_attr3:${interaction.user.id}`)
 		  .setTitle('Attributs techniques (3/3)');
@@ -1703,6 +1737,23 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		cjSessions.set(interaction.user.id, { ...prev, a3 });
 
+		const btnPhysAttr = new ButtonBuilder()
+		  .setCustomId(`cj_open_physattr:${interaction.user.id}`)
+		  .setLabel('➡️ Attributs physiques')
+		  .setStyle(ButtonStyle.Primary);
+		return interaction.reply({
+		  embeds: [new EmbedBuilder().setColor(0x2ecc71).setDescription('✅ Attributs 3/3 enregistrés ! Total technique : **180/180** ✅')],
+		  components: [new ActionRowBuilder().addComponents(btnPhysAttr)],
+		  ephemeral: true,
+		});
+	  });
+
+	  // Étape 12b : bouton → ouvre modal attributs physiques
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('cj_open_physattr:')) return;
+		const userId12b = interaction.customId.split(':')[1];
+		if (interaction.user.id !== userId12b) return interaction.reply({ content: 'Ce bouton ne t\'appartient pas.', ephemeral: true });
 		const physAttrModal = new ModalBuilder()
 		  .setCustomId(`cj_physattr:${interaction.user.id}`)
 		  .setTitle('Attributs physiques — 80 pts, max 20/stat');
