@@ -430,6 +430,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  'SELECT Rank AS RaceRank, Points AS RacePoints, Year FROM RaceRanking WHERE PlayerId=? AND Circuit=0 ORDER BY Year DESC LIMIT 1'
 		).get(tmPlayerId) ?? {};
 
+		const bestRankRow = s.prepare(
+		  'SELECT MIN(Rank) AS BestRank FROM Ranking WHERE PlayerId=? AND Circuit=0'
+		).get(tmPlayerId) ?? {};
+		const bestRank = bestRankRow.BestRank != null ? bestRankRow.BestRank + 1 : null;
+
 		const stats = s.prepare(`
 		  SELECT
 			SUM(MatchPlayed)              AS played,
@@ -462,10 +467,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		).get(tmPlayerId)?.cnt ?? 0;
 
 		const lastResults = s.prepare(`
-		  SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon
+		  SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
+		    tp2.Firstname || ' ' || tp2.Lastname AS OpponentName
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  LEFT JOIN TournamentResult tr2 ON tr2.TournamentId = tr.TournamentId
+		    AND tr2.Year = tr.Year AND tr2.RoundReached = tr.RoundReached
+		    AND tr2.PlayerId != tr.PlayerId
+		  LEFT JOIN TennisPlayer tp2 ON tp2.Id = tr2.PlayerId
 		  WHERE tr.PlayerId=?
 		  ORDER BY tr.Date DESC LIMIT 5
 		`).all(tmPlayerId);
@@ -479,7 +489,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  'SELECT Zone, Type FROM Injury WHERE PlayerId=? AND IsActive=1'
 		).all(tmPlayerId);
 
-		return { p, rank, race, stats, surfStats, titles, finals, lastResults, totalMoney, injuries };
+		return { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries };
 	  } catch (e) {
 		console.error('Erreur lecture save.db:', e.message);
 		return null;
@@ -792,7 +802,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		return embed;
 	  }
 
-	  const { p, rank, race, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tmData;
+	  const { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tmData;
 
 	  // ── Identité TM ─────────────────────────────────────────────────────────────
 	  embed.addFields(
@@ -802,10 +812,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '🎂 Âge',         value: `${age(p.DateOfBirth)} ans`,             inline: true },
 		{ name: '🖐️ Main',        value: HAND_LABEL[p.Handedness] ?? '—',        inline: true },
 		{ name: '🎯 Revers',      value: BH_LABEL[p.BackhandStyle] ?? '—',        inline: true },
-		{ name: '⭐ Potentiel',   value: `${(p.Potential ?? 0).toFixed(1)}/20`,   inline: true },
 		{ name: '💪 Condition',   value: `${p.PhysicalCondition ?? '—'}/100`,     inline: true },
 		{ name: '❤️ Moral',      value: `${p.Morale ?? '—'}/100`,                inline: true },
 		{ name: '🌟 Notoriété',   value: `${(p.Fame ?? 0).toFixed(1)}/20`,        inline: true },
+		{ name: '\u200B',         value: '\u200B',                                 inline: true },
 	  );
 
 	  if (injuries?.length) {
@@ -815,12 +825,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── Classement ──────────────────────────────────────────────────────────────
 	  embed.addFields(
 		{ name: '─────── 📈 Classement ───────', value: '\u200B' },
-		{ name: '🏅 Rang ATP',     value: rank.Rank != null ? `**#${rank.Rank + 1}**` : '—',        inline: true },
-		{ name: '🔢 Points ATP',   value: rank.Points != null ? `${rank.Points}` : '—',               inline: true },
-		{ name: '🏟️ Tournois',   value: rank.NbTournamentPlayed != null ? `${rank.NbTournamentPlayed}` : '—', inline: true },
-		{ name: '🏎️ Race rang',   value: race.RaceRank != null ? `**#${race.RaceRank + 1}**` : '—', inline: true },
-		{ name: '🏎️ Race pts',    value: race.RacePoints != null ? `${race.RacePoints}` : '—',  inline: true },
-		{ name: '💵 Prize money', value: moneyFmt(totalMoney),                                   inline: true },
+		{ name: '🏅 Rang ATP',     value: rank.Rank != null ? `**#${rank.Rank + 1}**` : '—',                         inline: true },
+		{ name: '🏆 Meilleur rang',value: bestRank != null ? `**#${bestRank}**` : '—',                               inline: true },
+		{ name: '🔢 Points ATP',   value: rank.Points != null ? `${rank.Points}` : '—',                               inline: true },
+		{ name: '🏟️ Tournois',   value: rank.NbTournamentPlayed != null ? `${rank.NbTournamentPlayed}` : '—',       inline: true },
+		{ name: '🏎️ Race rang',   value: race.RaceRank != null ? `**#${race.RaceRank + 1}**` : '—',                 inline: true },
+		{ name: '💵 Prize money', value: moneyFmt(totalMoney),                                                        inline: true },
 	  );
 
 	  // ── Palmarès ────────────────────────────────────────────────────────────────
@@ -831,44 +841,33 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '📊 Bilan',   value: stats.played ? `**${stats.won}V** / ${(stats.played - stats.won)}D (${pct(stats.won, stats.played)})` : '—', inline: true },
 	  );
 
-	  // ── Stats match ─────────────────────────────────────────────────────────────
-	  if (stats.played) {
-		embed.addFields(
-		  { name: '─────── 📊 Stats match ───────', value: '\u200B' },
-		  { name: '🎾 Aces',          value: `${stats.aces ?? 0}`,               inline: true },
-		  { name: '❌ Doubles f.',    value: `${stats.df ?? 0}`,                  inline: true },
-		  { name: '\u200B',           value: '\u200B',                            inline: true },
-		  { name: '💥 1er service',   value: pct(stats.fs1w, stats.fs1p),        inline: true },
-		  { name: '🔄 2ème service',  value: pct(stats.fs2w, stats.fs2p),        inline: true },
-		  { name: '\u200B',           value: '\u200B',                            inline: true },
-		  { name: '🛡️ BP sauvés',    value: pct(stats.bpSaved, stats.bpFaced),  inline: true },
-		  { name: '⚡ BP convertis',  value: pct(stats.bpConv, stats.bpOpp),     inline: true },
-		  { name: '\u200B',           value: '\u200B',                            inline: true },
-		);
-	  }
-
-	  // ── Bilan par surface ────────────────────────────────────────────────────────
-	  if (surfStats.length) {
-		const lines = surfStats.map(s =>
-		  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
-		).join('\n');
-		embed.addFields({ name: '─────── 🌍 Bilan par surface ───────', value: lines });
+	  // ── Attributs (condensé) ────────────────────────────────────────────────────
+	  if (p) {
+		// Calcul des moyennes par groupe à partir de ATTR_GROUPS
+		const groupAvgs = Object.entries(ATTR_GROUPS).map(([groupName, attrs]) => {
+		  const vals = attrs.map(([key]) => p[key] ?? 0);
+		  const avg = vals.length ? (vals.reduce((a, b) => a + b, 0) / vals.length).toFixed(1) : '—';
+		  return { groupName, avg };
+		});
+		const attrLine = groupAvgs.map(g => `${g.groupName} **${g.avg}**`).join('\n');
+		embed.addFields({ name: '─────── 🎯 Attributs (moyennes) ───────', value: attrLine });
 	  }
 
 	  // ── Maîtrise surface ────────────────────────────────────────────────────────
 	  embed.addFields(
 		{ name: '─────── 🏟️ Maîtrise surface ───────', value: '\u200B' },
-		{ name: '🔶 Terre battue', value: surfBar(p.ClaySurfaceMastering),      inline: true },
-		{ name: '🟩 Gazon',        value: surfBar(p.GrassSurfaceMastering),     inline: true },
-		{ name: '🔷 Dur',          value: surfBar(p.HardSurfaceMastering),      inline: true },
-		{ name: '🏟️ Dur indoor',  value: surfBar(p.HardIndoorSurfaceMastering), inline: true },
+		{ name: '🔶 Terre battue', value: surfBar(p.ClaySurfaceMastering),       inline: true },
+		{ name: '🟩 Gazon',        value: surfBar(p.GrassSurfaceMastering),      inline: true },
+		{ name: '🔷 Dur',          value: surfBar(p.HardSurfaceMastering),       inline: true },
+		{ name: '🏟️ Dur indoor',  value: surfBar(p.HardIndoorSurfaceMastering),  inline: true },
 	  );
 
 	  // ── Derniers résultats ───────────────────────────────────────────────────────
 	  if (lastResults.length) {
-		const lines = lastResults.map(r =>
-		  `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
-		).join('\n');
+		const lines = lastResults.map(r => {
+		  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
+		  return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
+		}).join('\n');
 		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
 	  }
 
@@ -921,16 +920,18 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	}
 
 	function buildPublicStatsEmbed(tm) {
-	  const { p, rank, race, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tm;
+	  const { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tm;
 	  const name = `${p.Firstname} ${p.Lastname}`;
 	  const embed = new EmbedBuilder()
 		.setColor(COLOR.tennis)
-		.setTitle(`🎾 ${name} (${p.Country ?? '??'})`)
+		.setTitle(`📊 Stats — ${name} (${p.Country ?? '??'})`)
 		.setDescription(
-		  `${HAND_LABEL[p.Handedness] ?? ''} — ${BH_LABEL[p.BackhandStyle] ?? ''} | Age : **${age(p.DateOfBirth)}** ans\n` +
-		  `Classement : **#${rank.Rank != null ? rank.Rank + 1 : '?'}** (${(rank.Points ?? 0).toLocaleString()} pts) | Race : **#${race.RaceRank != null ? race.RaceRank + 1 : '?'}**`
+		  `${HAND_LABEL[p.Handedness] ?? ''} — ${BH_LABEL[p.BackhandStyle] ?? ''} | Âge : **${age(p.DateOfBirth)}** ans\n` +
+		  `Classement actuel : **#${rank.Rank != null ? rank.Rank + 1 : '?'}** (${(rank.Points ?? 0).toLocaleString()} pts)` +
+		  (bestRank != null ? ` | Meilleur : **#${bestRank}**` : '') +
+		  ` | Race : **#${race.RaceRank != null ? race.RaceRank + 1 : '?'}**`
 		)
-		.setFooter({ text: 'Tennis Manager 2026 — Stats publiques' })
+		.setFooter({ text: 'Tennis Manager 2026 — Stats' })
 		.setTimestamp();
 
 	  embed.addFields(
@@ -941,9 +942,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  if (stats.played) {
 		embed.addFields(
-		  { name: '🎾 Aces', value: `${stats.aces ?? 0}`, inline: true },
-		  { name: '💥 1er service', value: pct(stats.fs1w, stats.fs1p), inline: true },
-		  { name: '⚡ BP convertis', value: pct(stats.bpConv, stats.bpOpp), inline: true },
+		  { name: '─────── 📊 Stats match ───────', value: '\u200B' },
+		  { name: '🎾 Aces',          value: `${stats.aces ?? 0}`,              inline: true },
+		  { name: '❌ Doubles f.',    value: `${stats.df ?? 0}`,                 inline: true },
+		  { name: '\u200B',           value: '\u200B',                           inline: true },
+		  { name: '💥 1er service',   value: pct(stats.fs1w, stats.fs1p),       inline: true },
+		  { name: '🔄 2ème service',  value: pct(stats.fs2w, stats.fs2p),       inline: true },
+		  { name: '\u200B',           value: '\u200B',                           inline: true },
+		  { name: '🛡️ BP sauvés',    value: pct(stats.bpSaved, stats.bpFaced), inline: true },
+		  { name: '⚡ BP convertis',  value: pct(stats.bpConv, stats.bpOpp),    inline: true },
+		  { name: '💵 Gains carrière',value: moneyFmt(totalMoney),              inline: true },
 		);
 	  }
 
@@ -951,21 +959,21 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const lines = surfStats.map(s =>
 		  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
 		).join('\n');
-		embed.addFields({ name: '🌍 Bilan par surface', value: lines });
+		embed.addFields({ name: '─────── 🌍 Bilan par surface ───────', value: lines });
 	  }
 
 	  if (lastResults.length) {
-		const lines = lastResults.map(r =>
-		  `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
-		).join('\n');
-		embed.addFields({ name: '📋 Derniers résultats', value: lines });
+		const lines = lastResults.map(r => {
+		  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
+		  return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
+		}).join('\n');
+		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
 	  }
 
 	  if (injuries.length) {
 		embed.addFields({ name: '🩹 Blessures', value: injuries.map(i => `• Zone ${i.Zone} (Type ${i.Type})`).join('\n') });
 	  }
 
-	  embed.addFields({ name: '💵 Gains carrière', value: moneyFmt(totalMoney), inline: true });
 	  return embed;
 	}
 
@@ -1346,9 +1354,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			embedTm.addFields({ name: '🌍 Bilan par surface', value: lines });
 		  }
 		  if (tm.lastResults.length) {
-			const lines = tm.lastResults.map(r =>
-			  `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
-			).join('\n');
+			const lines = tm.lastResults.map(r => {
+			  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
+			  return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
+			}).join('\n');
 			embedTm.addFields({ name: '📋 Derniers résultats', value: lines });
 		  }
 		  return interaction.editReply({ embeds: [embedTm] });
