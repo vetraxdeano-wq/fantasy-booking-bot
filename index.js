@@ -362,6 +362,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
 	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥇', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
 	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2)
+	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'M1000', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
 
 	function getTmPlayerByName(query) {
 	  const s = openSaveDb();
@@ -694,7 +695,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── Derniers résultats ───────────────────────────────────────────────────────
 	  if (lastResults.length) {
 		const lines = lastResults.map(r =>
-		  `${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} ${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+		  `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
 		).join('\n');
 		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
 	  }
@@ -775,7 +776,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  if (lastResults.length) {
 		const lines = lastResults.map(r =>
-		  `${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} ${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+		  `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
 		).join('\n');
 		embed.addFields({ name: '📋 Derniers résultats', value: lines });
 	  }
@@ -1155,7 +1156,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  }
 		  if (tm.lastResults.length) {
 			const lines = tm.lastResults.map(r =>
-			  `${TOURN_CAT_EMOJI[r.Category] ?? '🎾'} ${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
+			  `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})`
 			).join('\n');
 			embedTm.addFields({ name: '📋 Derniers résultats', value: lines });
 		  }
