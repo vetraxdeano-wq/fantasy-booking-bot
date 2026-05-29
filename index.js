@@ -815,10 +815,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // ── Classement ──────────────────────────────────────────────────────────────
 	  embed.addFields(
 		{ name: '─────── 📈 Classement ───────', value: '\u200B' },
-		{ name: '🏅 Rang ATP',     value: rank.Rank != null ? `**#${rank.Rank}**` : '—',        inline: true },
-		{ name: '🔢 Points ATP',   value: rank.Points != null ? `${rank.Points}` : '—',         inline: true },
+		{ name: '🏅 Rang ATP',     value: rank.Rank != null ? `**#${rank.Rank + 1}**` : '—',        inline: true },
+		{ name: '🔢 Points ATP',   value: rank.Points != null ? `${rank.Points}` : '—',               inline: true },
 		{ name: '🏟️ Tournois',   value: rank.NbTournamentPlayed != null ? `${rank.NbTournamentPlayed}` : '—', inline: true },
-		{ name: '🏎️ Race rang',   value: race.RaceRank != null ? `**#${race.RaceRank}**` : '—', inline: true },
+		{ name: '🏎️ Race rang',   value: race.RaceRank != null ? `**#${race.RaceRank + 1}**` : '—', inline: true },
 		{ name: '🏎️ Race pts',    value: race.RacePoints != null ? `${race.RacePoints}` : '—',  inline: true },
 		{ name: '💵 Prize money', value: moneyFmt(totalMoney),                                   inline: true },
 	  );
@@ -928,7 +928,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.setTitle(`🎾 ${name} (${p.Country ?? '??'})`)
 		.setDescription(
 		  `${HAND_LABEL[p.Handedness] ?? ''} — ${BH_LABEL[p.BackhandStyle] ?? ''} | Age : **${age(p.DateOfBirth)}** ans\n` +
-		  `Classement : **#${rank.Rank ?? '?'}** (${(rank.Points ?? 0).toLocaleString()} pts) | Race : **#${race.RaceRank ?? '?'}**`
+		  `Classement : **#${rank.Rank != null ? rank.Rank + 1 : '?'}** (${(rank.Points ?? 0).toLocaleString()} pts) | Race : **#${race.RaceRank != null ? race.RaceRank + 1 : '?'}**`
 		)
 		.setFooter({ text: 'Tennis Manager 2026 — Stats publiques' })
 		.setTimestamp();
@@ -1059,9 +1059,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  const medals = ['🥇', '🥈', '🥉'];
 	  const lines = slice.map((r) => {
-		const pos = r.Rank ?? (start + slice.indexOf(r) + 1); // Rank est 1-indexé en DB
-		const displayPos = pos;
-		const prefix = page === 0 && pos <= 3 ? medals[pos - 1] : `#${displayPos}`;
+		const pos = r.Rank ?? (start + slice.indexOf(r)); // Rank est 0-indexé en DB
+		const displayPos = pos + 1;
+		const prefix = page === 0 && pos <= 2 ? medals[pos] : `#${displayPos}`;
 		return `${prefix} **${r.Firstname} ${r.Lastname}** (${r.Country ?? '??'}) — ${(r.Points ?? 0).toLocaleString()} pts`;
 	  }).join('\n');
 
