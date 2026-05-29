@@ -969,38 +969,40 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  if (cmd === 'link') {
 		await interaction.deferReply({ ephemeral: true });
 
+		// Double sécurité admin côté code
+		if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+		  return interaction.editReply({ embeds: [err('Commande réservée aux administrateurs.')] });
+
 		const target = interaction.options.getUser('joueur');
-		const player = await db.get(target.id);
-		if (!player)
-		  return interaction.editReply({ embeds: [err(`<@${target.id}> n'a pas encore de joueur créé.`)] });
+		if (!target)
+		  return interaction.editReply({ embeds: [err('Utilisateur Discord introuvable.')] });
 
 		if (!seasonDbReady)
-		  return interaction.editReply({ embeds: [err('Save.db non disponible. Vérifie la configuration Supabase.')] });
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
 		const query   = interaction.options.getString('nom').trim();
 		const results = searchTmPlayers(query);
 
 		if (!results.length)
-		  return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"** dans le save.db.`)] });
+		  return interaction.editReply({ embeds: [err('Aucun joueur trouvé pour **"' + query + '"** dans le save.db.')] });
 
 		if (results.length === 1) {
 		  const tm = results[0];
 		  await db.linkTm(target.id, tm.Id);
 		  return interaction.editReply({ embeds: [ok('Joueur lié !',
-			`**${player.ingame_name}** (<@${target.id}>) est maintenant lié à **${tm.Firstname} ${tm.Lastname}** (${tm.Country}).`
+			'<@' + target.id + '> (' + target.username + ') est maintenant lié à **' + tm.Firstname + ' ' + tm.Lastname + '** (' + tm.Country + ') — ID `' + tm.Id + '`.'
 		  )]});
 		}
 
-		const lines = results.map((tm, i) =>
-		  `\`${i + 1}.\` **${tm.Firstname} ${tm.Lastname}** (${tm.Country}) — ID \`${tm.Id}\``
+		const linkLines = results.map((tm, i) =>
+		  '`' + (i + 1) + '.` **' + tm.Firstname + ' ' + tm.Lastname + '** (' + tm.Country + ') — ID `' + tm.Id + '`'
 		).join('\n');
 		return interaction.editReply({ embeds: [
 		  new EmbedBuilder().setColor(COLOR.blue)
 			.setTitle('🔍 Plusieurs joueurs trouvés')
-			.setDescription(`${lines}\n\nRefais \`/link\` avec le prénom + nom complet pour préciser.`)
+			.setDescription(linkLines + '\n\nRefais `/link` avec le prénom + nom complet pour préciser.')
 		] });
 	  }
-
 	  // ── /profil ───────────────────────────────────────────────────────────────────
 	  if (cmd === 'profil') {
 		await interaction.deferReply();
