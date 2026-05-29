@@ -1195,7 +1195,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setDescription('Distribue manuellement les récompenses tournois sans reload du save.db'))
 		.addSubcommand(s => s
 		  .setName('info_db')
-		  .setDescription('Infos sur le save.db actuellement chargé')),
+		  .setDescription('Infos sur le save.db actuellement chargé'))
+		.addSubcommand(s => s
+		  .setName('recap_boost')
+		  .setDescription('Voir tous les boosts en attente d\'application dans le save.db')),
 	];
 
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -1635,14 +1638,25 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		const embed = new EmbedBuilder()
 		  .setColor(COLOR.green)
-		  .setTitle('✅ Boost appliqué !')
+		  .setTitle('🚀 Boost acheté !')
 		  .setDescription(
-			`**\${statLabel}** : \${curVal.toFixed(1)} → **\${(curVal + 1).toFixed(1)}** (+1)\n` +
-			`Coût : **-\${cost.toLocaleString()} 🪙**\n` +
-			`Boosts restants sur cette stat : **\${BOOST_MAX_PER_STAT - used - 1}**\n` +
-			`Nouveau solde : **\${(player.coins - cost).toLocaleString()} 🪙**`
+			`<@\${interaction.user.id}> a boosté **\${statLabel}** !\n` +
+			`\${curVal.toFixed(1)} → **\${(curVal + 1).toFixed(1)}** (+1)\n` +
+			`Coût : **-\${cost.toLocaleString()} 🪙** | Solde restant : **\${(player.coins - cost).toLocaleString()} 🪙**\n` +
+			`Boosts restants sur cette stat : **\${BOOST_MAX_PER_STAT - used - 1}**`
 		  )
-		  .setFooter({ text: 'Les boosts sont permanents et visibles dans /attributs' });
+		  .setFooter({ text: 'Boost en attente d\'application dans le save.db — visible dans /admin recap_boost' });
+
+		// Stocker le boost dans boost_log pour recap admin
+		await supabase.from('boost_log').insert({
+		  discord_id: interaction.user.id,
+		  ingame_name: player.ingame_name ?? player.username,
+		  stat_key: statKey,
+		  stat_label: statLabel,
+		  from_val: curVal,
+		  to_val: curVal + 1,
+		  cost,
+		});
 
 		return interaction.reply({ embeds: [embed] });
 	  }
@@ -1726,8 +1740,56 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			  )
 		  ], ephemeral: true });
 		}
+
+		if (sub === 'recap_boost') {
+		  await interaction.deferReply({ ephemeral: true });
+		  return sendRecapBoost(interaction, true);
+		}
 	  }
 	}
+
+// ── Helpers recap_boost ────────────────────────────────────────────────────────
+async function buildRecapBoostEmbed() {
+  const { data: logs, error } = await supabase
+	.from('boost_log')
+	.select('*')
+	.order('created_at', { ascending: true });
+
+  const embed = new EmbedBuilder().setColor(0x5865F2).setTitle('📋 Boosts en attente d\'application');
+
+  if (error || !logs || logs.length === 0) {
+	embed.setDescription('✅ Aucun boost en attente — save.db à jour !');
+	return embed;
+  }
+
+  // Grouper par joueur
+  const byPlayer = {};
+  for (const row of logs) {
+	if (!byPlayer[row.discord_id]) byPlayer[row.discord_id] = { name: row.ingame_name, lines: [] };
+	const ts = Math.floor(new Date(row.created_at).getTime() / 1000);
+	byPlayer[row.discord_id].lines.push(
+	  `• **${row.stat_label}** : ${Number(row.from_val).toFixed(1)} → **${Number(row.to_val).toFixed(1)}** \`(-${(row.cost ?? 0).toLocaleString()} 🪙)\` <t:${ts}:R>`
+	);
+  }
+
+  for (const [discordId, data] of Object.entries(byPlayer)) {
+	embed.addFields({ name: `👤 ${data.name} (<@${discordId}>)`, value: data.lines.join('\n') });
+  }
+
+  embed.setFooter({ text: `${logs.length} boost(s) au total — appuie sur 🗑️ après les avoir appliqués manuellement` });
+  return embed;
+}
+
+async function sendRecapBoost(interaction, edit = false) {
+  const embed = await buildRecapBoostEmbed();
+  const row = new ActionRowBuilder().addComponents(
+	new ButtonBuilder().setCustomId('recap_boost:refresh').setEmoji('🔄').setLabel('Rafraîchir').setStyle(ButtonStyle.Secondary),
+	new ButtonBuilder().setCustomId('recap_boost:clear').setEmoji('🗑️').setLabel('Clear (appliqués)').setStyle(ButtonStyle.Danger),
+  );
+  const payload = { embeds: [embed], components: [row] };
+  if (edit) return interaction.editReply(payload);
+  return interaction.reply({ ...payload, ephemeral: true });
+}
 
 	// ══════════════════════════════════════════════════════════════════════════════
 	//  DÉPLOIEMENT & DÉMARRAGE
@@ -2620,6 +2682,30 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		});
 		// Confirmation privée
 		return interaction.update({ content: '✅ Ton joueur a été créé avec succès !', embeds: [], components: [] });
+	  });
+
+	  // ── Boutons recap_boost ──────────────────────────────────────────────────────
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('recap_boost:')) return;
+		if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator))
+		  return interaction.reply({ content: '❌ Réservé aux admins.', ephemeral: true });
+
+		await interaction.deferUpdate();
+
+		if (interaction.customId === 'recap_boost:refresh') {
+		  return sendRecapBoost(interaction, true);
+		}
+
+		if (interaction.customId === 'recap_boost:clear') {
+		  const { error } = await supabase.from('boost_log').delete().neq('id', 0);
+		  if (error) {
+			const errEmbed = new EmbedBuilder().setColor(0xe74c3c).setDescription(`❌ Erreur clear : ${error.message}`);
+			return interaction.editReply({ embeds: [errEmbed], components: [] });
+		  }
+		  const doneEmbed = new EmbedBuilder().setColor(0x2ecc71).setTitle('🗑️ Boost log vidé').setDescription('Tous les boosts ont été marqués comme appliqués dans le save.db.');
+		  return interaction.editReply({ embeds: [doneEmbed], components: [] });
+		}
 	  });
 
 	  // ── Boutons pagination classement ──────────────────────────────────────────────
