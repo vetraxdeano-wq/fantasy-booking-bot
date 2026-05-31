@@ -1724,7 +1724,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			}).join('\n');
 			embedTm.addFields({ name: '📋 Derniers résultats', value: lines });
 		  }
-		  return interaction.editReply({ embeds: [embedTm] });
+		  const tmName1 = `${p.Firstname} ${p.Lastname}`;
+		  const navRow1 = buildProfilNavButtons(tmName1);
+		  return interaction.editReply({ embeds: [embedTm], components: navRow1 });
 		}
 
 		// Mode Discord : joueur mentionné ou soi-même
@@ -1740,8 +1742,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		}
 
 		const tmData = player.tm_player_id ? getTmPlayerData(player.tm_player_id) : null;
+		let profilComponents = [];
+		if (player.tm_player_id && tmData) {
+		  const tmName2 = `${tmData.p.Firstname} ${tmData.p.Lastname}`;
+		  profilComponents = buildProfilNavButtons(tmName2);
+		}
 		return interaction.editReply({
-		  embeds: [buildProfileEmbed(player, tmData, target.displayAvatarURL({ dynamic: true }))]
+		  embeds: [buildProfileEmbed(player, tmData, target.displayAvatarURL({ dynamic: true }))],
+		  components: profilComponents,
 		});
 	  }
 
@@ -2410,6 +2418,23 @@ async function sendRecapBoost(interaction, edit = false) {
 	// Si --deploy est passé en argument, on déploie les commandes PUIS on démarre
 	// le bot (comportement Render : la Start Command est toujours "node index.js").
 	// Pour un deploy one-shot depuis ta machine : node index.js --deploy --exit
+
+// ── Boutons de navigation rapide du profil ──────────────────────────────────
+function buildProfilNavButtons(tmName) {
+  const n = tmName.slice(0, 80);
+  const row1 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`pnav:stats:${n}`)      .setLabel('📊 Stats')       .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`pnav:palmares:${n}`)   .setLabel('🏆 Palmarès')    .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`pnav:historique:${n}`) .setLabel('📅 Historique')  .setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`pnav:attributs:${n}`)  .setLabel('📋 Attributs')   .setStyle(ButtonStyle.Secondary),
+  );
+  const row2 = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`pnav:h2h:${n}`)        .setLabel('⚔️ H2H')          .setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`pnav:coins:${n}`)      .setLabel('💰 Mes coins')    .setStyle(ButtonStyle.Secondary),
+  );
+  return [row1, row2];
+}
+
 	async function startBot() {
 	  if (process.argv.includes('--deploy')) {
 		console.log('[Boot] Mode --deploy détecté : déploiement des commandes slash...');
@@ -3377,6 +3402,113 @@ async function sendRecapBoost(interaction, edit = false) {
 		  else interaction.reply(msg);
 		}
 	  });
+
+	  // ── Navigation profil : boutons ─────────────────────────────────────────────
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isButton()) return;
+		if (!interaction.customId.startsWith('pnav:')) return;
+
+		const parts  = interaction.customId.split(':');
+		const action = parts[1];
+		const tmName = parts.slice(2).join(':');
+
+		if (!seasonDbReady)
+		  return interaction.reply({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+
+		const results = getTmPlayerByName(tmName);
+		if (!results.length)
+		  return interaction.reply({ embeds: [err(`Joueur **${tmName}** introuvable.`)], ephemeral: true });
+		const r = results[0];
+
+		if (action === 'stats') {
+		  await interaction.deferReply({ ephemeral: true });
+		  const tm   = getTmPlayerData(r.Id);
+		  if (!tm) return interaction.editReply({ embeds: [err('Impossible de lire les stats.')] });
+		  const forme     = getTmForme(r.Id);
+		  const rivalites = getTmRivalites(r.Id);
+		  return interaction.editReply({ embeds: [buildPublicStatsEmbed(tm, forme, rivalites)] });
+		}
+
+		if (action === 'palmares') {
+		  await interaction.deferReply({ ephemeral: true });
+		  const palmares = getTmPalmares(r.Id);
+		  if (!palmares) return interaction.editReply({ embeds: [err('Impossible de lire le palmarès.')] });
+		  return interaction.editReply({ embeds: [buildPalmaresEmbed(r, palmares)] });
+		}
+
+		if (action === 'historique') {
+		  await interaction.deferReply({ ephemeral: true });
+		  const s2 = openSaveDb();
+		  if (!s2) return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+		  let pRow;
+		  try { pRow = s2.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(r.Id); }
+		  finally { s2.close(); }
+		  const timeline = getTmHistorique(r.Id);
+		  return interaction.editReply({ embeds: [buildHistoriqueEmbed(pRow, timeline)] });
+		}
+
+		if (action === 'attributs') {
+		  await interaction.deferReply({ ephemeral: true });
+		  const s2 = openSaveDb();
+		  if (!s2) return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+		  let pRow;
+		  try { pRow = s2.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(r.Id); }
+		  finally { s2.close(); }
+		  const fakeP = { ingame_name: `${pRow.Firstname} ${pRow.Lastname}` };
+		  return interaction.editReply({ embeds: [buildAttributesEmbed(fakeP, pRow, null)] });
+		}
+
+		if (action === 'coins') {
+		  await interaction.deferReply({ ephemeral: true });
+		  const player = await db.get(interaction.user.id);
+		  if (!player) return interaction.editReply({ embeds: [err('Tu n\'as pas de compte Discord lié.')] });
+		  return interaction.editReply({ embeds: [buildWalletEmbed(player, await db.txHistory(interaction.user.id))] });
+		}
+
+		if (action === 'h2h') {
+		  // Ouvrir un modal pour saisir le nom de l'adversaire
+		  const modal = new ModalBuilder()
+			.setCustomId(`pnav_h2h_modal:${tmName}`)
+			.setTitle(`🎾 H2H — vs ${tmName}`);
+		  modal.addComponents(
+			new ActionRowBuilder().addComponents(
+			  new TextInputBuilder()
+				.setCustomId('h2h_adversaire')
+				.setLabel('Prénom / Nom de l\'adversaire')
+				.setStyle(TextInputStyle.Short)
+				.setMinLength(2).setMaxLength(50)
+				.setPlaceholder('ex: Novak Djokovic')
+				.setRequired(true)
+			)
+		  );
+		  return interaction.showModal(modal);
+		}
+	  });
+
+	  // ── Navigation profil : modal H2H submit ─────────────────────────────────────
+	  client.on('interactionCreate', async (interaction) => {
+		if (!interaction.isModalSubmit()) return;
+		if (!interaction.customId.startsWith('pnav_h2h_modal:')) return;
+
+		await interaction.deferReply({ ephemeral: true });
+
+		const tmName1 = interaction.customId.split(':').slice(1).join(':');
+		const tmName2 = interaction.fields.getTextInputValue('h2h_adversaire').trim();
+
+		const r1 = getTmPlayerByName(tmName1);
+		const r2 = getTmPlayerByName(tmName2);
+
+		if (!r1.length) return interaction.editReply({ embeds: [err(`Joueur **${tmName1}** introuvable.`)] });
+		if (!r2.length) return interaction.editReply({ embeds: [err(`Joueur **"${tmName2}"** introuvable dans le save.db.`)] });
+		if (r1[0].Id === r2[0].Id) return interaction.editReply({ embeds: [err('Les deux joueurs sont identiques.')] });
+
+		const h2h    = getH2H(r1[0].Id, r2[0].Id);
+		if (!h2h) return interaction.editReply({ embeds: [err('Impossible de calculer le H2H.')] });
+		const stats1 = getTmRawStats(r1[0].Id);
+		const stats2 = getTmRawStats(r2[0].Id);
+		return interaction.editReply({ embeds: [buildH2HEmbed(r1[0], r2[0], h2h, stats1, stats2)] });
+	  });
+
 
 	  console.log('[Discord] Connexion en cours...');
 	  client.login(process.env.DISCORD_TOKEN).catch((e) => {
