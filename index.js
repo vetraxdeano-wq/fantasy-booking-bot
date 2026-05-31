@@ -504,6 +504,165 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  }
 	}
 
+	// Forme récente : bilan sur les N derniers matchs + tendance
+	function getTmForme(tmId, n = 20) {
+	  const s = openSaveDb();
+	  if (!s) return null;
+	  try {
+		const tableExists = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
+		if (!tableExists) return null;
+
+		const matches = s.prepare(`
+		  SELECT mr.WinnerId, mr.LoserId, mr.Date,
+			t.Name AS TournName, tc.Type AS Category, mr.Surface
+		  FROM MatchResult mr
+		  JOIN Tournament t ON t.Id = mr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  WHERE mr.WinnerId=? OR mr.LoserId=?
+		  ORDER BY mr.Date DESC LIMIT ?
+		`).all(tmId, tmId, n);
+
+		if (!matches.length) return null;
+
+		const wins = matches.filter(m => m.WinnerId === tmId).length;
+		const losses = matches.length - wins;
+
+		// Séquence des 5 derniers (pour tendance)
+		const last5 = matches.slice(0, 5).map(m => m.WinnerId === tmId ? '🟢' : '🔴').join('');
+
+		// Série en cours
+		let streak = 0;
+		let streakType = null;
+		for (const m of matches) {
+		  const won = m.WinnerId === tmId;
+		  if (streakType === null) streakType = won;
+		  if (won === streakType) streak++;
+		  else break;
+		}
+
+		return { total: matches.length, wins, losses, last5, streak, streakType };
+	  } catch (e) { console.error('Forme error:', e.message); return null; }
+	  finally { s.close(); }
+	}
+
+	// Rivalité principale : top 3 adversaires les plus fréquents
+	function getTmRivalites(tmId) {
+	  const s = openSaveDb();
+	  if (!s) return [];
+	  try {
+		const tableExists = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
+		if (!tableExists) return [];
+
+		const rivals = s.prepare(`
+		  SELECT
+			opp.Id,
+			opp.Firstname || ' ' || opp.Lastname AS Name,
+			opp.Country,
+			COUNT(*) AS total,
+			SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS wins,
+			SUM(CASE WHEN mr.LoserId=? THEN 1 ELSE 0 END) AS losses
+		  FROM MatchResult mr
+		  JOIN TennisPlayer opp ON opp.Id = CASE WHEN mr.WinnerId=? THEN mr.LoserId ELSE mr.WinnerId END
+		  WHERE mr.WinnerId=? OR mr.LoserId=?
+		  GROUP BY opp.Id
+		  ORDER BY total DESC LIMIT 3
+		`).all(tmId, tmId, tmId, tmId, tmId);
+
+		return rivals;
+	  } catch (e) { console.error('Rivalites error:', e.message); return []; }
+	  finally { s.close(); }
+	}
+
+	// Timeline carrière par année
+	function getTmHistorique(tmId) {
+	  const s = openSaveDb();
+	  if (!s) return null;
+	  try {
+		const { sel: catSel, join: catJoin } = getTournCategoryJoin(s);
+
+		// Titres par année
+		const titlesPerYear = s.prepare(`
+		  SELECT tr.Year, COUNT(*) AS cnt,
+			GROUP_CONCAT(t.Name, '|') AS names
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
+		  GROUP BY tr.Year ORDER BY tr.Year
+		`).all(tmId);
+
+		// GC par année
+		const gcPerYear = s.prepare(`
+		  SELECT tr.Year, COUNT(*) AS cnt
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
+			AND (tc.Type=1 OR (tc.Type=3 AND (
+			  lower(t.Name) LIKE '%grand chelem%'
+			)))
+		  GROUP BY tr.Year
+		`).all(tmId);
+
+		// Meilleur classement par année
+		const rankPerYear = s.prepare(`
+		  SELECT strftime('%Y', Date, 'unixepoch') AS year,
+			MIN(Rank)+1 AS bestRank,
+			(SELECT Rank+1 FROM Ranking r2
+			 WHERE r2.PlayerId=? AND r2.Circuit=0
+			   AND strftime('%Y', r2.Date, 'unixepoch') = strftime('%Y', r.Date, 'unixepoch')
+			 ORDER BY r2.Date DESC LIMIT 1) AS endRank
+		  FROM Ranking r
+		  WHERE PlayerId=? AND Circuit=0
+		  GROUP BY year ORDER BY year
+		`).all(tmId, tmId);
+
+		// Bilan V/D par année
+		const bilanPerYear = s.prepare(`
+		  SELECT Year, SUM(MatchPlayed) AS played, SUM(MatchWon) AS won
+		  FROM TennisPlayerStatistics
+		  WHERE PlayerId=? AND Circuit=0
+		  GROUP BY Year ORDER BY Year
+		`).all(tmId);
+
+		// Gains par année
+		const gainsPerYear = s.prepare(`
+		  SELECT Year, SUM(MoneyWon) AS total
+		  FROM TournamentResult
+		  WHERE PlayerId=?
+		  GROUP BY Year ORDER BY Year
+		`).all(tmId);
+
+		// Assembler par année
+		const years = new Set([
+		  ...titlesPerYear.map(r => String(r.Year)),
+		  ...rankPerYear.map(r => String(r.year)),
+		  ...bilanPerYear.map(r => String(r.Year)),
+		]);
+
+		const timeline = [...years].sort().map(year => {
+		  const t   = titlesPerYear.find(r => String(r.Year) === year);
+		  const gc  = gcPerYear.find(r => String(r.Year) === year);
+		  const rk  = rankPerYear.find(r => String(r.year) === year);
+		  const bil = bilanPerYear.find(r => String(r.Year) === year);
+		  const g   = gainsPerYear.find(r => String(r.Year) === year);
+		  return {
+			year,
+			titles:    t?.cnt ?? 0,
+			titleNames: t?.names ? t.names.split('|') : [],
+			gcTitles:  gc?.cnt ?? 0,
+			bestRank:  rk?.bestRank ?? null,
+			endRank:   rk?.endRank ?? null,
+			played:    bil?.played ?? 0,
+			won:       bil?.won ?? 0,
+			money:     g?.total ?? 0,
+		  };
+		});
+
+		return timeline;
+	  } catch (e) { console.error('Historique error:', e.message); return null; }
+	  finally { s.close(); }
+	}
+
 	function searchTmPlayers(query) {
 	  const s = openSaveDb();
 	  if (!s) return [];
@@ -626,6 +785,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		return { wins1, wins2, meetings, surfH2H };
 	  } catch (e) { console.error('H2H error:', e.message); return null; }
+	  finally { s.close(); }
+	}
+
+	// Stats TM brutes d'un joueur pour la comparaison dans /h2h
+	function getTmRawStats(tmId) {
+	  const s = openSaveDb();
+	  if (!s) return null;
+	  try {
+		return s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(tmId) ?? null;
+	  } catch { return null; }
 	  finally { s.close(); }
 	}
 
@@ -924,7 +1093,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  return embed;
 	}
 
-	function buildPublicStatsEmbed(tm) {
+	function buildPublicStatsEmbed(tm, forme, rivalites) {
 	  const { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tm;
 	  const name = `${p.Firstname} ${p.Lastname}`;
 	  const embed = new EmbedBuilder()
@@ -944,6 +1113,21 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '🥈 Finales', value: `**${finals}**`, inline: true },
 		{ name: '📊 Bilan', value: stats.played ? `**${stats.won}V** / ${stats.played - stats.won}D (${pct(stats.won, stats.played)})` : '—', inline: true },
 	  );
+
+	  // ── Forme récente ────────────────────────────────────────────────────────────
+	  if (forme) {
+		const streakLabel = forme.streakType
+		  ? `🔥 ${forme.streak} victoire${forme.streak > 1 ? 's' : ''} de suite`
+		  : `❄️ ${forme.streak} défaite${forme.streak > 1 ? 's' : ''} de suite`;
+		embed.addFields({
+		  name: '─────── 📈 Forme récente ───────',
+		  value:
+			`**${forme.wins}V / ${forme.losses}D** sur les ${forme.total} derniers matchs ` +
+			`(${pct(forme.wins, forme.total)})\n` +
+			`5 derniers : ${forme.last5}\n` +
+			streakLabel,
+		});
+	  }
 
 	  if (stats.played) {
 		embed.addFields(
@@ -967,6 +1151,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		embed.addFields({ name: '─────── 🌍 Bilan par surface ───────', value: lines });
 	  }
 
+	  // ── Rivalités principales ────────────────────────────────────────────────────
+	  if (rivalites?.length) {
+		const lines = rivalites.map(r => {
+		  const bilan = `**${r.wins}V**–${r.losses}D sur ${r.total} match${r.total > 1 ? 's' : ''}`;
+		  const edge = r.wins > r.losses ? '🟢' : r.wins < r.losses ? '🔴' : '🟡';
+		  return `${edge} **${r.Name}** (${r.Country}) — ${bilan}`;
+		}).join('\n');
+		embed.addFields({ name: '─────── ⚔️ Rivalités principales ───────', value: lines });
+	  }
+
 	  if (lastResults.length) {
 		const lines = lastResults.map(r => {
 		  const cat = normalizeTournCat(r.Category, r.Name);
@@ -983,7 +1177,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  return embed;
 	}
 
-	function buildH2HEmbed(p1, p2, h2h) {
+	function buildH2HEmbed(p1, p2, h2h, stats1, stats2) {
 	  const name1 = `${p1.Firstname} ${p1.Lastname}`;
 	  const name2 = `${p2.Firstname} ${p2.Lastname}`;
 	  const total = h2h.wins1 + h2h.wins2;
@@ -1010,6 +1204,45 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  return `${label} : **${s.w1}**–**${s.w2}** (${s.total} matchs)`;
 		}).join('\n');
 		embed.addFields({ name: '🏟️ Par surface', value: surfLines });
+	  }
+
+	  // ── Comparaison d'attributs ──────────────────────────────────────────────────
+	  if (stats1 && stats2) {
+		// Groupes de comparaison : moyenne par catégorie
+		const compareGroups = [
+		  { label: '🎾 Service',       keys: ['ServePower','ServeSpin','ServeConsistency'] },
+		  { label: '🎯 Fond de court', keys: ['Forehand','ForehandConsistency','Backhand','BackhandConsistency','Return','Counter','Topspin','Underspin','Dropshot','Control','Timing'] },
+		  { label: '🏃 Physique',      keys: ['Speed','Footwork','Balance','Agility','Fitness','Stamina'] },
+		  { label: '🧠 Mental',        keys: ['Anticipation','Focus','Composure','KillerInstinct','FightingSpirit','Tactical'] },
+		  { label: '🏅 Volée',         keys: ['Volley'] },
+		];
+
+		const avg = (obj, keys) => {
+		  const vals = keys.map(k => obj[k] ?? 0);
+		  return vals.reduce((a, b) => a + b, 0) / vals.length;
+		};
+
+		const compLines = compareGroups.map(g => {
+		  const a1 = avg(stats1, g.keys);
+		  const a2 = avg(stats2, g.keys);
+		  const diff = a1 - a2;
+		  const edge = Math.abs(diff) < 0.3 ? '🟡' : diff > 0 ? '🟢' : '🔴';
+		  // Barre visuelle centrée
+		  const filled1 = Math.round(a1 / 20 * 5);
+		  const filled2 = Math.round(a2 / 20 * 5);
+		  return `${edge} **${g.label}** — ${a1.toFixed(1)} ${'●'.repeat(filled1)}${'○'.repeat(5-filled1)} vs ${'●'.repeat(filled2)}${'○'.repeat(5-filled2)} ${a2.toFixed(1)}`;
+		}).join('\n');
+
+		// Ligne totale
+		const allKeys = compareGroups.flatMap(g => g.keys);
+		const tot1 = avg(stats1, allKeys);
+		const tot2 = avg(stats2, allKeys);
+		const totEdge = Math.abs(tot1 - tot2) < 0.2 ? '🟡' : tot1 > tot2 ? '🟢' : '🔴';
+
+		embed.addFields({
+		  name: `─────── 📊 Comparaison — ${p1.Lastname} vs ${p2.Lastname} ───────`,
+		  value: compLines + `\n\n${totEdge} **Moyenne globale** — **${tot1.toFixed(1)}** vs **${tot2.toFixed(1)}**`,
+		});
 	  }
 
 	  // Derniers matchs
@@ -1051,6 +1284,69 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		embed.addFields({ name: 'Titres', value: '*Aucun titre remporté.*' });
 	  }
 
+
+	  return embed;
+	}
+
+	function buildHistoriqueEmbed(p, timeline) {
+	  const name = `${p.Firstname} ${p.Lastname}`;
+	  const embed = new EmbedBuilder()
+		.setColor(COLOR.gold)
+		.setTitle(`📅 Historique de carrière — ${name} (${p.Country})`)
+		.setFooter({ text: 'Tennis Manager 2026 — Historique' })
+		.setTimestamp();
+
+	  if (!timeline?.length) {
+		embed.setDescription('*Aucune donnée de carrière disponible.*');
+		return embed;
+	  }
+
+	  // Totaux carrière en description
+	  const totalTitles = timeline.reduce((s, y) => s + y.titles, 0);
+	  const totalPlayed = timeline.reduce((s, y) => s + y.played, 0);
+	  const totalWon    = timeline.reduce((s, y) => s + y.won, 0);
+	  const totalMoney  = timeline.reduce((s, y) => s + y.money, 0);
+	  const bestRankEver = timeline.reduce((best, y) => {
+		if (y.bestRank == null) return best;
+		return best == null ? y.bestRank : Math.min(best, y.bestRank);
+	  }, null);
+
+	  embed.setDescription(
+		`**${totalTitles}** titre${totalTitles !== 1 ? 's' : ''} · ` +
+		`**${totalWon}V/${totalPlayed - totalWon}D** en carrière (${pct(totalWon, totalPlayed)})` +
+		(bestRankEver ? ` · Meilleur classement : **#${bestRankEver}**` : '') +
+		(totalMoney > 0 ? `\n💵 Total gains : **${moneyFmt(totalMoney)}**` : '')
+	  );
+
+	  // Une ligne par année, en chunks de 10 pour éviter la limite Discord
+	  const yearLines = timeline.map(y => {
+		const parts = [];
+
+		if (y.bestRank) parts.push(`📍 #${y.bestRank} (fin: #${y.endRank ?? '?'})`);
+		if (y.played) parts.push(`${y.won}V/${y.played - y.won}D (${pct(y.won, y.played)})`);
+
+		if (y.titles > 0) {
+		  const titleStr = y.titleNames.length <= 3
+			? y.titleNames.join(', ')
+			: `${y.titleNames.slice(0, 3).join(', ')}… (+${y.titleNames.length - 3})`;
+		  const gcNote = y.gcTitles > 0 ? ` 🏆×${y.gcTitles}` : '';
+		  parts.push(`🥇 ${y.titles} titre${y.titles > 1 ? 's' : ''}${gcNote} — ${titleStr}`);
+		}
+
+		if (y.money > 0) parts.push(`💵 ${moneyFmt(y.money)}`);
+
+		const line = parts.join(' · ');
+		return `**${y.year}** — ${line || '*Saison sans résultat notable*'}`;
+	  });
+
+	  // Découper en champs de max 10 années
+	  for (let i = 0; i < yearLines.length; i += 10) {
+		const chunk = yearLines.slice(i, i + 10);
+		const firstYear = timeline[i].year;
+		const lastYear  = timeline[Math.min(i + 9, timeline.length - 1)].year;
+		const label = firstYear === lastYear ? firstYear : `${firstYear} – ${lastYear}`;
+		embed.addFields({ name: `📆 ${label}`, value: chunk.join('\n').slice(0, 1024) });
+	  }
 
 	  return embed;
 	}
@@ -1167,6 +1463,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  new SlashCommandBuilder()
 		.setName('palmares')
 		.setDescription('Palmarès détaillé d\'un joueur (Grand Chelem, Masters 1000...)')
+		.addStringOption(o => o.setName('nom').setDescription('Prénom ou nom du joueur TM2026').setRequired(true)),
+
+	  new SlashCommandBuilder()
+		.setName('historique')
+		.setDescription('Timeline de carrière année par année d\'un joueur TM2026')
 		.addStringOption(o => o.setName('nom').setDescription('Prénom ou nom du joueur TM2026').setRequired(true)),
 
 	  new SlashCommandBuilder()
@@ -1497,7 +1798,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const tm = getTmPlayerData(results[0].Id);
 		if (!tm) return interaction.editReply({ embeds: [err('Impossible de lire les stats de ce joueur.')] });
 
-		return interaction.editReply({ embeds: [buildPublicStatsEmbed(tm)] });
+		const forme     = getTmForme(results[0].Id);
+		const rivalites = getTmRivalites(results[0].Id);
+		return interaction.editReply({ embeds: [buildPublicStatsEmbed(tm, forme, rivalites)] });
 	  }
 
 	  // ── /h2h ─────────────────────────────────────────────────────────────────────
@@ -1527,7 +1830,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const h2h = getH2H(p1.Id, p2.Id);
 		if (!h2h) return interaction.editReply({ embeds: [err('Impossible de calculer le H2H.')] });
 
-		return interaction.editReply({ embeds: [buildH2HEmbed(p1, p2, h2h)] });
+		const stats1 = getTmRawStats(p1.Id);
+		const stats2 = getTmRawStats(p2.Id);
+		return interaction.editReply({ embeds: [buildH2HEmbed(p1, p2, h2h, stats1, stats2)] });
 	  }
 
 	  // ── /palmares ────────────────────────────────────────────────────────────────
@@ -1557,6 +1862,40 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!palmares) return interaction.editReply({ embeds: [err('Impossible de lire le palmarès.')] });
 
 		return interaction.editReply({ embeds: [buildPalmaresEmbed(results[0], palmares)] });
+	  }
+
+	  // ── /historique ──────────────────────────────────────────────────────────────
+	  if (cmd === 'historique') {
+		await interaction.deferReply();
+		if (!seasonDbReady)
+		  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+
+		const query = interaction.options.getString('nom').trim();
+		const results = getTmPlayerByName(query);
+
+		if (!results.length)
+		  return interaction.editReply({ embeds: [err(`Aucun joueur trouvé pour **"${query}"**.`)] });
+
+		if (results.length > 1) {
+		  const lines = results.map((r, i) =>
+			`${i + 1}. **${r.Firstname} ${r.Lastname}** (${r.Country})`
+		  ).join('\n');
+		  return interaction.editReply({ embeds: [
+			new EmbedBuilder().setColor(COLOR.blue)
+			  .setTitle('🔍 Plusieurs joueurs trouvés')
+			  .setDescription(`${lines}\n\nPrécise le prénom + nom complet.`)
+		  ] });
+		}
+
+		const s = openSaveDb();
+		if (!s) return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+		let p;
+		try { p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(results[0].Id); }
+		finally { s.close(); }
+		if (!p) return interaction.editReply({ embeds: [err('Joueur introuvable dans le save.db.')] });
+
+		const timeline = getTmHistorique(results[0].Id);
+		return interaction.editReply({ embeds: [buildHistoriqueEmbed(p, timeline)] });
 	  }
 
 	  // ── /classement ──────────────────────────────────────────────────────────────
