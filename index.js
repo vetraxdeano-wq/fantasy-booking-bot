@@ -1779,23 +1779,46 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  return interaction.editReply({ embeds: [buildProfileEmbed(player, null, profilPhoto)] });
 		}
 
-		const tmName2   = `${tmFull.p.Firstname} ${tmFull.p.Lastname}`;
-		const forme2    = getTmForme(player.tm_player_id);
-		const rivals2   = getTmRivalites(player.tm_player_id);
+		// Même embed que /profil <nom> — construit identiquement
+		const pFull = tmFull.p;
 		const profilPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
-
-		const embedFull = buildPublicStatsEmbed(tmFull, forme2, rivals2);
-		// Ajouter photo + coins en tête
-		embedFull.setThumbnail(profilPhoto);
-		embedFull.spliceFields(0, 0,
-		  { name: '🎮 Pseudo', value: `**${player.ingame_name}**`, inline: true },
-		  { name: '💰 Coins',  value: `**${player.coins.toLocaleString()} 🪙**`, inline: true },
-		  { name: '\u200B',   value: '\u200B', inline: true },
+		const embedDiscord = new EmbedBuilder()
+		  .setColor(COLOR.tennis)
+		  .setTitle(`🎾 ${pFull.Firstname} ${pFull.Lastname} (${pFull.Country ?? '—'})`)
+		  .setDescription(`${HAND_LABEL[pFull.Handedness] ?? '—'} — ${BH_LABEL[pFull.BackhandStyle] ?? '—'} | Âge : **${age(pFull.DateOfBirth)} ans**\n🎮 **${player.ingame_name}** | 💰 **${player.coins.toLocaleString()} 🪙**`)
+		  .setThumbnail(profilPhoto)
+		  .setFooter({ text: 'Tennis Manager 2026 — Profil TM' })
+		  .setTimestamp();
+		embedDiscord.addFields(
+		  { name: '💪 Condition', value: `${pFull.PhysicalCondition ?? '—'}/100`, inline: true },
+		  { name: '❤️ Moral',     value: `${pFull.Morale ?? '—'}/100`,            inline: true },
+		  { name: '🌟 Notoriété', value: `${(pFull.Fame ?? 0).toFixed(1)}/20`,    inline: true },
 		);
+		for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
+		  const lines = attrs.map(([key, label]) => {
+			const val = pFull[key] ?? 0;
+			return `\`${label.padEnd(20)}\` ${attrBar(val)}`;
+		  }).join('\n');
+		  embedDiscord.addFields({ name: groupName, value: lines, inline: false });
+		}
+		if (tmFull.surfStats.length) {
+		  const lines = tmFull.surfStats.map(s =>
+			`${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
+		  ).join('\n');
+		  embedDiscord.addFields({ name: '🌍 Bilan par surface', value: lines });
+		}
+		if (tmFull.lastResults.length) {
+		  const lines = tmFull.lastResults.map(r => {
+			const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
+			return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
+		  }).join('\n');
+		  embedDiscord.addFields({ name: '📋 Derniers résultats', value: lines });
+		}
 
+		const tmName2 = `${pFull.Firstname} ${pFull.Lastname}`;
 		const profilComponents2 = buildProfilNavButtons(tmName2);
 		return interaction.editReply({
-		  embeds: [embedFull],
+		  embeds: [embedDiscord],
 		  components: profilComponents2,
 		});
 	  }
