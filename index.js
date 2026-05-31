@@ -198,6 +198,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!p) return;
 		await supabase.from('players').update({ coins: p.coins + n }).eq('discord_id', id);
 		await supabase.from('transactions').insert({ discord_id: id, amount: n, reason: r ?? 'Gain' });
+		// Déclencher l'auto-upgrade immédiatement si le joueur en a activé un
+		// (fire-and-forget : pas d'await pour ne pas bloquer l'appelant)
+		runAutoUpgrade(autoUpgradeLogChannel, id).catch(e =>
+		  console.error('[AutoUpgrade] Erreur déclenchement réactif:', e.message)
+		);
 	  },
 	  removeCoins: async (id, n, r) => {
 		const { data: p } = await supabase.from('players').select('coins').eq('discord_id', id).single();
@@ -762,6 +767,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	// ══════════════════════════════════════════════════════════════════════════════
 	const COLOR = { green: 0x2ECC71, red: 0xE74C3C, blue: 0x3498DB, gold: 0xF1C40F, tennis: 0x1A6B3C, purple: 0x9B59B6 };
 
+	// Référence partagée au canal de log auto-upgrade (initialisée au boot du client)
+	let autoUpgradeLogChannel = null;
+
 	const PLAYSTYLE_EMOJI = {
 	  'Attaquant de fond': '⚡', 'Défenseur de fond': '🛡️',
 	  'Serveur-Volleyeur': '🏹', 'Monteur au filet': '🔥', 'Tout-terrain': '🎯',
@@ -1205,7 +1213,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setDescription('Infos sur le save.db actuellement chargé'))
 		.addSubcommand(s => s
 		  .setName('recap_boost')
-		  .setDescription('Voir tous les boosts en attente d\'application dans le save.db')),
+		  .setDescription('Voir tous les boosts en attente d\'application dans le save.db'))
+		.addSubcommand(s => s
+		  .setName('auto_upgrade_all')
+		  .setDescription('(Admin) Déclenche manuellement l\'auto-upgrade pour tous les joueurs actifs')),
+
+	  new SlashCommandBuilder()
+		.setName('auto-upgrade')
+		.setDescription('Active/désactive l\'amélioration automatique de tes stats (bot investit tes coins automatiquement)'),
 	];
 
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -1671,7 +1686,76 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		return interaction.reply({ embeds: [embed] });
 	  }
 
-	  if (cmd === 'admin') {
+	  // ── /auto-upgrade ─────────────────────────────────────────────────────────────
+  if (cmd === 'auto-upgrade') {
+	await interaction.deferReply({ ephemeral: true });
+	const player = await db.get(interaction.user.id);
+	if (!player)
+	  return interaction.editReply({ embeds: [err('Tu n\'as pas de joueur. Utilise `/creer-joueur` !')] });
+	if (!player.tm_player_id)
+	  return interaction.editReply({ embeds: [err('Ton compte n\'est pas lié à un joueur TM2026. Utilise `/link`.')] });
+
+	const current = player.auto_upgrade ?? false;
+	const next = !current;
+	await supabase.from('players').update({ auto_upgrade: next }).eq('discord_id', interaction.user.id);
+
+	if (next) {
+	  // Aperçu des boosts disponibles
+	  const s = openSaveDb();
+	  let previewLines = '';
+	  if (s) {
+		try {
+		  const p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(player.tm_player_id);
+		  if (p) {
+			const boosts = player.boosts ?? {};
+			const candidates = BOOSTABLE_STATS
+			  .map(([key, label]) => {
+				const used = boosts[key] ?? 0;
+				const baseVal = p[key] ?? 0;
+				const curVal = Math.min(baseVal + used, BOOST_ABS_CAP);
+				if (used >= BOOST_MAX_PER_STAT || curVal >= BOOST_ABS_CAP) return null;
+				const cost = boostCost(curVal);
+				if (!isFinite(cost)) return null;
+				return { label, curVal, cost };
+			  })
+			  .filter(Boolean)
+			  .sort((a, b) => a.cost - b.cost)
+			  .slice(0, 5);
+			if (candidates.length) {
+			  previewLines = '\n\n**Prochains boosts ciblés (du moins cher) :**\n' +
+				candidates.map(c => `• **${c.label}** (${c.curVal.toFixed(1)}/20) → ${c.cost.toLocaleString()} 🪙`).join('\n');
+			}
+		  }
+		} finally { s.close(); }
+	  }
+
+	  return interaction.editReply({ embeds: [
+		new EmbedBuilder()
+		  .setColor(COLOR.purple)
+		  .setTitle('🤖 Auto-Upgrade activé !')
+		  .setDescription(
+			`Le bot va automatiquement améliorer les stats de **${player.ingame_name}** toutes les **5 minutes**, ` +
+			`en investissant tes coins dans les boosts les moins chers disponibles.\n\n` +
+			`💰 Solde actuel : **${player.coins.toLocaleString()} 🪙**` +
+			previewLines +
+			`\n\n> ⚠️ Les boosts restent dans le **boost_log** — l'admin doit les appliquer manuellement dans le save.db.\n` +
+			`> Désactive avec \`/auto-upgrade\` à tout moment.`
+		  )
+		  .setFooter({ text: 'Auto-Upgrade actif · toutes les 5 min' })
+		  .setTimestamp(),
+	  ] });
+	} else {
+	  return interaction.editReply({ embeds: [
+		new EmbedBuilder()
+		  .setColor(COLOR.blue)
+		  .setTitle('⏸️ Auto-Upgrade désactivé')
+		  .setDescription(`Le bot ne boostera plus automatiquement **${player.ingame_name}**.\nTes coins ne seront plus dépensés automatiquement.`)
+		  .setTimestamp(),
+	  ] });
+	}
+  }
+
+  if (cmd === 'admin') {
 		const sub = interaction.options.getSubcommand();
 
 		if (sub === 'donner_coins') {
@@ -1755,6 +1839,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  await interaction.deferReply({ ephemeral: true });
 		  return sendRecapBoost(interaction, true);
 		}
+
+		if (sub === 'auto_upgrade_all') {
+		  await interaction.deferReply({ ephemeral: true });
+		  try {
+			await runAutoUpgrade(interaction.channel);
+			return interaction.editReply({ embeds: [ok('Auto-Upgrade déclenché', 'L\'auto-upgrade a été exécuté pour tous les joueurs actifs. Consulte `/admin recap_boost` pour voir les boosts appliqués.')] });
+		  } catch (e) {
+			return interaction.editReply({ embeds: [err(`Erreur auto-upgrade : ${e.message}`)] });
+		  }
+		}
 	  }
 	}
 
@@ -1777,8 +1871,9 @@ async function buildRecapBoostEmbed() {
   for (const row of logs) {
 	if (!byPlayer[row.discord_id]) byPlayer[row.discord_id] = { name: row.ingame_name, lines: [] };
 	const ts = Math.floor(new Date(row.created_at).getTime() / 1000);
+	const autoTag = row.auto ? ' 🤖' : '';
 	byPlayer[row.discord_id].lines.push(
-	  `• **${row.stat_label}** : ${Number(row.from_val).toFixed(1)} → **${Number(row.to_val).toFixed(1)}** \`(-${(row.cost ?? 0).toLocaleString()} 🪙)\` <t:${ts}:R>`
+	  `• **${row.stat_label}** : ${Number(row.from_val).toFixed(1)} → **${Number(row.to_val).toFixed(1)}** \`(-${(row.cost ?? 0).toLocaleString()} 🪙)\`${autoTag} <t:${ts}:R>`
 	);
   }
 
@@ -1786,7 +1881,7 @@ async function buildRecapBoostEmbed() {
 	embed.addFields({ name: `👤 ${data.name} (<@${discordId}>)`, value: data.lines.join('\n') });
   }
 
-  embed.setFooter({ text: `${logs.length} boost(s) au total — appuie sur 🗑️ après les avoir appliqués manuellement` });
+  embed.setFooter({ text: `${logs.length} boost(s) au total (🤖 = auto-upgrade) — appuie sur 🗑️ après les avoir appliqués manuellement` });
   return embed;
 }
 
@@ -1800,6 +1895,117 @@ async function sendRecapBoost(interaction, edit = false) {
   if (edit) return interaction.editReply(payload);
   return interaction.reply({ ...payload, ephemeral: true });
 }
+
+	// ══════════════════════════════════════════════════════════════════════════════
+	//  AUTO-UPGRADE — Amélioration automatique des stats
+	//  Déclenchement : à chaque addCoins pour le joueur concerné (réactif).
+	//  Filet de sécurité : tick toutes les 30 min pour rattraper les éventuels ratés.
+	// ══════════════════════════════════════════════════════════════════════════════
+
+	// Exécute l'auto-upgrade pour un joueur précis (ou tous si discordId=null)
+	async function runAutoUpgrade(logChannel, discordId = null) {
+	  if (!seasonDbReady) return;
+
+	  let query = supabase
+		.from('players')
+		.select('discord_id, ingame_name, coins, tm_player_id, boosts, auto_upgrade')
+		.eq('auto_upgrade', true)
+		.not('tm_player_id', 'is', null);
+
+	  if (discordId) query = query.eq('discord_id', discordId);
+
+	  const { data: players, error } = await query;
+	  if (error || !players?.length) return;
+
+	  const s = openSaveDb();
+	  if (!s) return;
+
+	  try {
+		for (const player of players) {
+		  try {
+			const p = s.prepare('SELECT * FROM TennisPlayer WHERE Id=?').get(player.tm_player_id);
+			if (!p) continue;
+
+			const boosts = player.boosts ?? {};
+			let coins = player.coins;
+			const boostedThisRun = [];
+
+			// Stats boostables triées par coût croissant (la moins chère en priorité)
+			const candidates = BOOSTABLE_STATS
+			  .map(([key, label]) => {
+				const used = boosts[key] ?? 0;
+				const baseVal = p[key] ?? 0;
+				const curVal = Math.min(baseVal + used, BOOST_ABS_CAP);
+				if (used >= BOOST_MAX_PER_STAT) return null;
+				if (curVal >= BOOST_ABS_CAP) return null;
+				const cost = boostCost(curVal);
+				if (!isFinite(cost)) return null;
+				return { key, label, used, curVal, cost };
+			  })
+			  .filter(Boolean)
+			  .sort((a, b) => a.cost - b.cost);
+
+			// Vérifie d'abord si le joueur peut se payer au moins un boost
+			const affordable = candidates.filter(c => coins >= c.cost);
+			if (!affordable.length) continue; // rien à faire pour ce joueur
+
+			for (const cand of candidates) {
+			  if (coins < cand.cost) continue;
+
+			  const paid = await db.removeCoins(
+				player.discord_id,
+				cand.cost,
+				`[Auto-Upgrade] ${cand.label} ${cand.curVal.toFixed(1)}→${(cand.curVal + 1).toFixed(1)}`
+			  );
+			  if (!paid) continue;
+
+			  coins -= cand.cost;
+			  boosts[cand.key] = (boosts[cand.key] ?? 0) + 1;
+			  await supabase.from('players').update({ boosts }).eq('discord_id', player.discord_id);
+
+			  // Logger dans boost_log — visible dans /admin recap_boost
+			  await supabase.from('boost_log').insert({
+				discord_id: player.discord_id,
+				ingame_name: player.ingame_name ?? 'Inconnu',
+				stat_key: cand.key,
+				stat_label: cand.label,
+				from_val: cand.curVal,
+				to_val: cand.curVal + 1,
+				cost: cand.cost,
+				auto: true,
+			  });
+
+			  boostedThisRun.push({ label: cand.label, from: cand.curVal, to: cand.curVal + 1, cost: cand.cost });
+			}
+
+			if (boostedThisRun.length && logChannel) {
+			  const lines = boostedThisRun.map(b =>
+				`⬆️ **${b.label}** : ${b.from.toFixed(1)} → **${b.to.toFixed(1)}** \`(-${b.cost.toLocaleString()} 🪙)\``
+			  ).join('\n');
+			  const embed = new EmbedBuilder()
+				.setColor(COLOR.purple)
+				.setTitle('🤖 Auto-Upgrade déclenché')
+				.setDescription(
+				  `<@${player.discord_id}> — **${player.ingame_name}**\n\n${lines}\n\n` +
+				  `💰 Solde restant : **${coins.toLocaleString()} 🪙**`
+				)
+				.setFooter({ text: 'Auto-Upgrade automatique · désactive avec /auto-upgrade' })
+				.setTimestamp();
+			  try { await logChannel.send({ embeds: [embed] }); }
+			  catch (e) { console.error('[AutoUpgrade] Erreur notif:', e.message); }
+			}
+
+			if (boostedThisRun.length) {
+			  console.log(`[AutoUpgrade] ${player.ingame_name} — ${boostedThisRun.length} boost(s) appliqué(s)`);
+			}
+		  } catch (e) {
+			console.error(`[AutoUpgrade] Erreur pour ${player.discord_id}:`, e.message);
+		  }
+		}
+	  } finally {
+		s.close();
+	  }
+	}
 
 	// ══════════════════════════════════════════════════════════════════════════════
 	//  DÉPLOIEMENT & DÉMARRAGE
@@ -1844,6 +2050,21 @@ async function sendRecapBoost(interaction, edit = false) {
 		console.log(`[Discord] Serveurs : ${client.guilds.cache.size}`);
 		// Premier keep-alive immédiat
 		keepAlive();
+
+		// ── Auto-Upgrade : init canal + filet de sécurité toutes les 30 min ────────
+		const AUTO_UPGRADE_LOG_CHANNEL_ID = process.env.AUTO_UPGRADE_LOG_CHANNEL;
+		if (AUTO_UPGRADE_LOG_CHANNEL_ID) {
+		  autoUpgradeLogChannel = client.channels.cache.get(AUTO_UPGRADE_LOG_CHANNEL_ID) ?? null;
+		}
+
+		// Filet de sécurité : rattrapage toutes les 30 min (les gains normaux déclenchent déjà runAutoUpgrade en réactif via db.addCoins)
+		setInterval(() => {
+		  runAutoUpgrade(autoUpgradeLogChannel).catch(e =>
+			console.error('[AutoUpgrade] Erreur tick rattrapage:', e.message)
+		  );
+		}, 30 * 60 * 1000);
+
+		console.log('[AutoUpgrade] Mode réactif actif (déclenché sur chaque addCoins) + rattrapage 30 min');
 	  });
 
 	  client.on('disconnect', () => console.warn('[Discord] ⚠️  Déconnecté !'));
