@@ -474,15 +474,22 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		const lastResults = s.prepare(`
 		  SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
-		    tp2.Firstname || ' ' || tp2.Lastname AS OpponentName
+		    (
+		      SELECT tp2.Firstname || ' ' || tp2.Lastname
+		      FROM MatchResult mr
+		      JOIN TennisPlayer tp2 ON tp2.Id = CASE
+		        WHEN mr.WinnerId = tr.PlayerId THEN mr.LoserId
+		        ELSE mr.WinnerId
+		      END
+		      WHERE mr.TournamentId = tr.TournamentId
+		        AND mr.Year = tr.Year
+		        AND (mr.WinnerId = tr.PlayerId OR mr.LoserId = tr.PlayerId)
+		      ORDER BY mr.Date DESC LIMIT 1
+		    ) AS OpponentName
 		  FROM TournamentResult tr
-		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  JOIN Tournament t ON t.Id = tr.TournamentId
 		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		  LEFT JOIN TournamentResult tr2 ON tr2.TournamentId = tr.TournamentId
-		    AND tr2.Year = tr.Year AND tr2.RoundReached = tr.RoundReached
-		    AND tr2.PlayerId != tr.PlayerId
-		  LEFT JOIN TennisPlayer tp2 ON tp2.Id = tr2.PlayerId
-		  WHERE tr.PlayerId=?
+		  WHERE tr.PlayerId = ?
 		  ORDER BY tr.Date DESC LIMIT 5
 		`).all(tmPlayerId);
 
@@ -1338,6 +1345,46 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const line = parts.join(' · ');
 		return `**${y.year}** — ${line || '*Saison sans résultat notable*'}`;
 	  });
+
+	  // ── Graphique ASCII évolution classement saison par saison ─────────────────
+	  const rankData = timeline.filter(y => y.endRank != null);
+	  if (rankData.length >= 2) {
+	    const maxRank = Math.max(...rankData.map(y => y.endRank));
+	    const minRank = Math.min(...rankData.map(y => y.endRank));
+	    const HEIGHT  = 5;
+
+	    const normalize = (r) => {
+	      if (maxRank === minRank) return Math.floor(HEIGHT / 2);
+	      return Math.round(((r - minRank) / (maxRank - minRank)) * (HEIGHT - 1));
+	    };
+
+	    const cols = rankData.map(y => ({
+	      year: y.year,
+	      rank: y.endRank,
+	      row:  normalize(y.endRank),
+	    }));
+
+	    const graphRows = [];
+	    for (let row = 0; row < HEIGHT; row++) {
+	      const line = cols.map((c, idx) => {
+	        if (c.row === row) return '●';
+	        if (idx > 0) {
+	          const prev = cols[idx - 1];
+	          if ((prev.row < row && c.row > row) || (prev.row > row && c.row < row)) return '┊';
+	        }
+	        return ' ';
+	      }).join('  ');
+	      const rankAtRow = Math.round(minRank + (row / (HEIGHT - 1)) * (maxRank - minRank));
+	      graphRows.push(`#${String(rankAtRow).padStart(4)} ${line}`);
+	    }
+	    const yearLine = cols.map(c => String(c.year).slice(-2)).join('   ');
+	    graphRows.push(`       ${yearLine}`);
+
+	    embed.addFields({
+	      name: '📈 Évolution classement (fin de saison)',
+	      value: '```\n' + graphRows.join('\n') + '\n```',
+	    });
+	  }
 
 	  // Découper en champs de max 10 années
 	  for (let i = 0; i < yearLines.length; i += 10) {
