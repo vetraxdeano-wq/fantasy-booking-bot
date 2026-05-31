@@ -193,6 +193,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  linkTm: async (id, tmId) => {
 		await supabase.from('players').update({ tm_player_id: tmId }).eq('discord_id', id);
 	  },
+	  setPhoto: async (id, url) => {
+		await supabase.from('players').update({ character_photo: url }).eq('discord_id', id);
+	  },
 	  addCoins: async (id, n, r) => {
 		const { data: p } = await supabase.from('players').select('coins').eq('discord_id', id).single();
 		if (!p) return;
@@ -1573,7 +1576,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setDescription('Voir tous les boosts en attente d\'application dans le save.db'))
 		.addSubcommand(s => s
 		  .setName('auto_upgrade_all')
-		  .setDescription('(Admin) Déclenche manuellement l\'auto-upgrade pour tous les joueurs actifs')),
+		  .setDescription('(Admin) Déclenche manuellement l\'auto-upgrade pour tous les joueurs actifs'))
+		.addSubcommand(s => s
+		  .setName('set_photo')
+		  .setDescription('Associe une photo de personnage à un joueur (affichée dans /profil, /attributs, /stats...)')
+		  .addUserOption(o => o.setName('joueur').setDescription('Joueur Discord cible').setRequired(true))
+		  .addStringOption(o => o.setName('url').setDescription('URL directe de l\'image (png/jpg/gif/webp)').setRequired(true))),
 
 	  new SlashCommandBuilder()
 		.setName('auto-upgrade')
@@ -1756,8 +1764,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  const tmName2 = `${tmData.p.Firstname} ${tmData.p.Lastname}`;
 		  profilComponents = buildProfilNavButtons(tmName2);
 		}
+		const profilPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
 		return interaction.editReply({
-		  embeds: [buildProfileEmbed(player, tmData, target.displayAvatarURL({ dynamic: true }))],
+		  embeds: [buildProfileEmbed(player, tmData, profilPhoto)],
 		  components: profilComponents,
 		});
 	  }
@@ -1820,8 +1829,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		if (!p) return interaction.editReply({ embeds: [err('Joueur TM introuvable dans le save.db.')] });
 
+		const attrsPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
 		return interaction.editReply({
-		  embeds: [buildAttributesEmbed(player, p, target.displayAvatarURL({ dynamic: true }), await shopDb.getBoosts(interaction.user.id))]
+		  embeds: [buildAttributesEmbed(player, p, attrsPhoto, await shopDb.getBoosts(interaction.user.id))]
 		});
 	  }
 
@@ -2251,6 +2261,28 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  } catch (e) {
 			return interaction.editReply({ embeds: [err(`Erreur auto-upgrade : ${e.message}`)] });
 		  }
+		}
+
+		if (sub === 'set_photo') {
+		  const target = interaction.options.getUser('joueur');
+		  const url    = interaction.options.getString('url');
+		  if (!await db.exists(target.id))
+			return interaction.reply({ embeds: [err(`**${target.username}** n'a pas de joueur inscrit.`)], ephemeral: true });
+		  // Validation basique de l'URL
+		  if (!/^https?:\/\/.+\.(png|jpg|jpeg|gif|webp)(\?.*)?$/i.test(url))
+			return interaction.reply({ embeds: [err('URL invalide. Utilise un lien direct vers une image (png, jpg, gif, webp).')], ephemeral: true });
+		  await db.setPhoto(target.id, url);
+		  return interaction.reply({
+			embeds: [
+			  new EmbedBuilder()
+				.setColor(COLOR.green)
+				.setTitle('🖼️ Photo de personnage mise à jour')
+				.setDescription(`Photo associée à <@${target.id}> avec succès.\nElle sera visible dans \`/profil\`, \`/attributs\` et \`/stats\`.`)
+				.setThumbnail(url)
+				.setFooter({ text: 'Pour retirer la photo, utilise /admin set_photo avec une URL vide.' })
+			],
+			ephemeral: true
+		  });
 		}
 	  }
 	}
