@@ -993,12 +993,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const embed = new EmbedBuilder()
 		.setColor(COLOR.tennis)
 		.setTitle(`🎾 ${player.ingame_name}`)
-		.setDescription(`${PLAYSTYLE_EMOJI[player.playstyle] ?? '🎾'} *${player.playstyle}*  •  🌍 ${player.nationality}`)
+		.setDescription(`${PLAYSTYLE_EMOJI[player.playstyle] ?? '🎾'} ${player.playstyle ? `*${player.playstyle}*` : ''}  •  🌍 ${player.nationality}`.trim())
 		.setThumbnail(avatarUrl)
 		.addFields(
-		  { name: '💰 Coins',       value: `**${player.coins.toLocaleString()} 🪙**`, inline: true },
-		  { name: '📅 Inscrit le',  value: player.created_at.split(' ')[0],           inline: true },
-		  { name: '\u200B',         value: '\u200B',                                  inline: true },
+		  { name: '💰 Coins', value: `**${player.coins.toLocaleString()} 🪙**`, inline: true },
 		)
 		.setFooter({ text: 'Tennis Manager 2026 — Simulation' })
 		.setTimestamp();
@@ -1053,6 +1051,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '🔷 Dur',          value: surfBar(p.HardSurfaceMastering),       inline: true },
 		{ name: '🏟️ Dur indoor',  value: surfBar(p.HardIndoorSurfaceMastering),  inline: true },
 	  );
+
+	  // ── Bilan par surface ─────────────────────────────────────────────────────
+	  if (surfStats.length) {
+		const lines = surfStats.map(s =>
+		  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
+		).join('\n');
+		embed.addFields({ name: '─────── 🌍 Bilan par surface ───────', value: lines });
+	  }
 
 	  // ── Derniers résultats ───────────────────────────────────────────────────────
 	  if (lastResults.length) {
