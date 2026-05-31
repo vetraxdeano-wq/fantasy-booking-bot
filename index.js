@@ -1764,16 +1764,39 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  )] });
 		}
 
-		const tmData = player.tm_player_id ? getTmPlayerData(player.tm_player_id) : null;
-		let profilComponents = [];
-		if (player.tm_player_id && tmData) {
-		  const tmName2 = `${tmData.p.Firstname} ${tmData.p.Lastname}`;
-		  profilComponents = buildProfilNavButtons(tmName2);
+		// Pas de joueur TM lié → embed léger
+		if (!player.tm_player_id) {
+		  const profilPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
+		  return interaction.editReply({ embeds: [buildProfileEmbed(player, null, profilPhoto)] });
 		}
+
+		if (!seasonDbReady)
+		  return interaction.editReply({ embeds: [err('Save.db en cours de chargement, réessaie dans quelques secondes.')] });
+
+		const tmFull = getTmPlayerData(player.tm_player_id);
+		if (!tmFull) {
+		  const profilPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
+		  return interaction.editReply({ embeds: [buildProfileEmbed(player, null, profilPhoto)] });
+		}
+
+		const tmName2   = `${tmFull.p.Firstname} ${tmFull.p.Lastname}`;
+		const forme2    = getTmForme(player.tm_player_id);
+		const rivals2   = getTmRivalites(player.tm_player_id);
 		const profilPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
+
+		const embedFull = buildPublicStatsEmbed(tmFull, forme2, rivals2);
+		// Ajouter photo + coins en tête
+		embedFull.setThumbnail(profilPhoto);
+		embedFull.spliceFields(0, 0,
+		  { name: '🎮 Pseudo', value: `**${player.ingame_name}**`, inline: true },
+		  { name: '💰 Coins',  value: `**${player.coins.toLocaleString()} 🪙**`, inline: true },
+		  { name: '\u200B',   value: '\u200B', inline: true },
+		);
+
+		const profilComponents2 = buildProfilNavButtons(tmName2);
 		return interaction.editReply({
-		  embeds: [buildProfileEmbed(player, tmData, profilPhoto)],
-		  components: profilComponents,
+		  embeds: [embedFull],
+		  components: profilComponents2,
 		});
 	  }
 
