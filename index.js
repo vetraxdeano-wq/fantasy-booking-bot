@@ -472,8 +472,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  'SELECT COUNT(*) AS cnt FROM TournamentResult WHERE PlayerId=? AND RoundReached=0'
 		).get(tmPlayerId)?.cnt ?? 0;
 
-		const lastResults = s.prepare(`
-		  SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
+		// Vérifie si MatchResult existe avant d'essayer la sous-requête adversaire
+		const hasMatchResult = !!s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
+		const lastResultsQuery = hasMatchResult
+		  ? `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
 		    (
 		      SELECT tp2.Firstname || ' ' || tp2.Lastname
 		      FROM MatchResult mr
@@ -486,12 +488,19 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		        AND (mr.WinnerId = tr.PlayerId OR mr.LoserId = tr.PlayerId)
 		      ORDER BY mr.Date DESC LIMIT 1
 		    ) AS OpponentName
-		  FROM TournamentResult tr
-		  JOIN Tournament t ON t.Id = tr.TournamentId
-		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		  WHERE tr.PlayerId = ?
-		  ORDER BY tr.Date DESC LIMIT 5
-		`).all(tmPlayerId);
+		    FROM TournamentResult tr
+		    JOIN Tournament t ON t.Id = tr.TournamentId
+		    LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		    WHERE tr.PlayerId = ?
+		    ORDER BY tr.Date DESC LIMIT 5`
+		  : `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
+		    NULL AS OpponentName
+		    FROM TournamentResult tr
+		    JOIN Tournament t ON t.Id = tr.TournamentId
+		    LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		    WHERE tr.PlayerId = ?
+		    ORDER BY tr.Date DESC LIMIT 5`;
+		const lastResults = s.prepare(lastResultsQuery).all(tmPlayerId);
 
 		const totalMoney = s.prepare(
 		  'SELECT SUM(MoneyWon) AS total FROM TournamentResult WHERE PlayerId=?'
