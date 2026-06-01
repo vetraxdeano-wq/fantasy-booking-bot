@@ -9,8 +9,8 @@
 	//    GUILD_ID             → ID de ton serveur Discord
 	//    SUPABASE_URL         → ex: https://xxxx.supabase.co
 	//    SUPABASE_KEY         → clé service_role (pas anon) de Supabase
-	//    SUPABASE_BUCKET      → nom du bucket Supabase Storage (ex: "saves")
-	//    SUPABASE_FILE        → nom du fichier dans le bucket (ex: "save.db")
+	//    R2_PUBLIC_URL        → Public Development URL du bucket R2 (ex: https://pub-xxxx.r2.dev)
+	//    R2_FILE              → nom du fichier dans le bucket (ex: "save.db")
 	//    ADMIN_PASSWORD       → mot de passe pour la page web d'upload (optionnel)
 	//
 	//  SETUP :
@@ -87,51 +87,32 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	// → Remplace BOT_DB_PATH par un chemin sur Render Disk si tu en as un.
 
 	// ══════════════════════════════════════════════════════════════════════════════
-	//  CLOUDFLARE R2 — téléchargement du save.db
+	//  CLOUDFLARE R2 — téléchargement du save.db via URL publique
 	//  Variables d'env requises :
-	//    R2_ENDPOINT  → https://<account_id>.r2.cloudflarestorage.com
-	//    R2_BUCKET    → nom du bucket (ex: tm2026)
-	//    R2_FILE      → nom du fichier (ex: save.db)
-	//    R2_ACCESS_KEY_ID     → Access Key ID R2
-	//    R2_SECRET_ACCESS_KEY → Secret Access Key R2
+	//    R2_PUBLIC_URL → https://pub-xxxx.r2.dev  (Public Development URL du bucket)
+	//    R2_FILE       → nom du fichier (ex: save.db)
 	// ══════════════════════════════════════════════════════════════════════════════
 
 	async function r2Download() {
-	  const { R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
-	  if (!R2_ENDPOINT || !R2_BUCKET || !R2_FILE || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
-	    throw new Error('Variables R2 manquantes (R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)');
+	  const { R2_PUBLIC_URL, R2_FILE } = process.env;
+	  if (!R2_PUBLIC_URL || !R2_FILE) {
+	    throw new Error('Variables R2 manquantes (R2_PUBLIC_URL, R2_FILE)');
 	  }
 
-	  // Utilise le SDK AWS officiel — gère TLS/Cloudflare R2 correctement (évite SSL handshake failure du https natif)
-	  const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
-	  const { Readable } = require('stream');
-
-	  const endpoint = R2_ENDPOINT.replace(/\/+$/, '');
-	  console.log(`[R2] Endpoint : ${endpoint} | Bucket : ${R2_BUCKET} | File : ${R2_FILE}`);
-
-	  const s3 = new S3Client({
-	    region: 'auto',
-	    endpoint,
-	    credentials: {
-	      accessKeyId:     R2_ACCESS_KEY_ID,
-	      secretAccessKey: R2_SECRET_ACCESS_KEY,
-	    },
-	    forcePathStyle: true, // Cloudflare R2 requiert path-style
-	  });
-
-	  const cmd  = new GetObjectCommand({ Bucket: R2_BUCKET, Key: R2_FILE });
-	  const resp = await s3.send(cmd);
+	  const url = `${R2_PUBLIC_URL.replace(/\/+$/, '')}/${R2_FILE}`;
+	  console.log(`[R2] Téléchargement public : ${url}`);
 
 	  await new Promise((resolve, reject) => {
 	    const file = fs.createWriteStream(SEASON_DB_PATH);
-	    const body = resp.Body;
-	    if (!body) return reject(new Error('R2 : Body vide dans la réponse'));
-	    // resp.Body est un ReadableStream web (SDK v3) — convertir en Node stream
-	    const nodeStream = body instanceof Readable ? body : Readable.fromWeb(body);
-	    nodeStream.pipe(file);
-	    file.on('finish', () => { file.close(); resolve(); });
-	    file.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
-	    nodeStream.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
+	    https.get(url, (res) => {
+	      if (res.statusCode !== 200) {
+	        fs.unlink(SEASON_DB_PATH, () => {});
+	        return reject(new Error(`R2 : HTTP ${res.statusCode}`));
+	      }
+	      res.pipe(file);
+	      file.on('finish', () => { file.close(); resolve(); });
+	      file.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
+	    }).on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
 	  });
 	}
 
@@ -144,11 +125,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	console.log(`[Boot] GUILD_ID           : ${process.env.GUILD_ID            ? '✅ défini' : '❌ MANQUANT'}`);
 	console.log(`[Boot] SUPABASE_URL       : ${process.env.SUPABASE_URL        ? '✅ défini' : '❌ MANQUANT'}`);
 	console.log(`[Boot] SUPABASE_KEY       : ${process.env.SUPABASE_KEY        ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] R2_ENDPOINT        : ${process.env.R2_ENDPOINT         ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] R2_BUCKET          : ${process.env.R2_BUCKET           ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] R2_PUBLIC_URL      : ${process.env.R2_PUBLIC_URL        ? '✅ défini' : '❌ MANQUANT'}`);
 	console.log(`[Boot] R2_FILE            : ${process.env.R2_FILE             ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] R2_ACCESS_KEY_ID   : ${process.env.R2_ACCESS_KEY_ID    ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] R2_SECRET_ACCESS_KEY: ${process.env.R2_SECRET_ACCESS_KEY ? '✅ défini' : '❌ MANQUANT'}`);
 	console.log(`[Boot] RENDER_EXTERNAL_URL: ${process.env.RENDER_EXTERNAL_URL ?? '⚠️  non défini (keep-alive désactivé)'}`);
 	console.log('[Boot] ═══════════════════════════════════════════════');
 	console.log('[Boot] Téléchargement du save.db depuis Cloudflare R2...');
