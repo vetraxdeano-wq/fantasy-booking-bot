@@ -87,40 +87,73 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	// → Remplace BOT_DB_PATH par un chemin sur Render Disk si tu en as un.
 
 	// ══════════════════════════════════════════════════════════════════════════════
-	//  SUPABASE STORAGE — téléchargement du save.db
+	//  CLOUDFLARE R2 — téléchargement du save.db
+	//  Variables d'env requises :
+	//    R2_ENDPOINT  → https://<account_id>.r2.cloudflarestorage.com
+	//    R2_BUCKET    → nom du bucket (ex: tm2026)
+	//    R2_FILE      → nom du fichier (ex: save.db)
+	//    R2_ACCESS_KEY_ID     → Access Key ID R2
+	//    R2_SECRET_ACCESS_KEY → Secret Access Key R2
 	// ══════════════════════════════════════════════════════════════════════════════
 
-	function supabaseDownload() {
+	function r2Download() {
 	  return new Promise((resolve, reject) => {
-		const { SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET, SUPABASE_FILE } = process.env;
-		if (!SUPABASE_URL || !SUPABASE_KEY || !SUPABASE_BUCKET || !SUPABASE_FILE) {
-		  return reject(new Error('Variables Supabase manquantes (SUPABASE_URL, SUPABASE_KEY, SUPABASE_BUCKET, SUPABASE_FILE)'));
+		const { R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
+		if (!R2_ENDPOINT || !R2_BUCKET || !R2_FILE || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+		  return reject(new Error('Variables R2 manquantes (R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)'));
 		}
 
-		const url = `${SUPABASE_URL}/storage/v1/object/${SUPABASE_BUCKET}/${SUPABASE_FILE}`;
-		const lib = url.startsWith('https') ? https : http;
+		// Signature AWS4-HMAC-SHA256 (R2 est compatible S3)
+		const crypto = require('crypto');
+		const url    = new URL(`${R2_ENDPOINT}/${R2_BUCKET}/${R2_FILE}`);
+
+		const now        = new Date();
+		const dateShort  = now.toISOString().slice(0, 10).replace(/-/g, '');   // YYYYMMDD
+		const dateLong   = now.toISOString().replace(/[:-]/g, '').slice(0, 15) + 'Z'; // YYYYMMDDTHHmmssZ
+		const region     = 'auto';
+		const service    = 's3';
+
+		const canonicalHeaders = `host:${url.hostname}\nx-amz-date:${dateLong}\n`;
+		const signedHeaders    = 'host;x-amz-date';
+		const payloadHash      = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'; // SHA256('')
+
+		const canonicalRequest = [
+		  'GET',
+		  url.pathname,
+		  '',
+		  canonicalHeaders,
+		  signedHeaders,
+		  payloadHash,
+		].join('\n');
+
+		const credentialScope = `${dateShort}/${region}/${service}/aws4_request`;
+		const stringToSign    = [
+		  'AWS4-HMAC-SHA256',
+		  dateLong,
+		  credentialScope,
+		  crypto.createHash('sha256').update(canonicalRequest).digest('hex'),
+		].join('\n');
+
+		const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
+		const signingKey = hmac(hmac(hmac(hmac('AWS4' + R2_SECRET_ACCESS_KEY, dateShort), region), service), 'aws4_request');
+		const signature  = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');
+
+		const authorization = `AWS4-HMAC-SHA256 Credential=${R2_ACCESS_KEY_ID}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
 
 		const file = fs.createWriteStream(SEASON_DB_PATH);
-		const req  = lib.get(url, {
+		const req  = https.get(url.href, {
 		  headers: {
-			'Authorization': `Bearer ${SUPABASE_KEY}`,
-			'apikey': SUPABASE_KEY,
+			'x-amz-date':    dateLong,
+			'Authorization': authorization,
 		  }
 		}, (res) => {
-		  if (res.statusCode === 301 || res.statusCode === 302) {
-			file.close();
-			return supabaseDownload().then(resolve).catch(reject);
-		  }
 		  if (res.statusCode !== 200) {
 			file.close();
 			fs.unlink(SEASON_DB_PATH, () => {});
-			return reject(new Error(`Supabase HTTP ${res.statusCode}`));
+			return reject(new Error(`R2 HTTP ${res.statusCode}`));
 		  }
 		  res.pipe(file);
-		  file.on('finish', () => {
-			file.close();
-			resolve();
-		  });
+		  file.on('finish', () => { file.close(); resolve(); });
 		});
 		req.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
 	  });
@@ -130,24 +163,26 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	let seasonDbReady = false;
 	console.log('[Boot] ═══════════════════════════════════════════════');
 	console.log('[Boot] 🎾 Tennis Manager 2026 — démarrage...');
-	console.log(`[Boot] DISCORD_TOKEN  : ${process.env.DISCORD_TOKEN  ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] CLIENT_ID      : ${process.env.CLIENT_ID      ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] GUILD_ID       : ${process.env.GUILD_ID       ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] SUPABASE_URL   : ${process.env.SUPABASE_URL   ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] SUPABASE_KEY   : ${process.env.SUPABASE_KEY   ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] SUPABASE_BUCKET: ${process.env.SUPABASE_BUCKET ? '✅ défini' : '❌ MANQUANT'}`);
-	console.log(`[Boot] SUPABASE_FILE  : ${process.env.SUPABASE_FILE  ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] DISCORD_TOKEN      : ${process.env.DISCORD_TOKEN       ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] CLIENT_ID          : ${process.env.CLIENT_ID           ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] GUILD_ID           : ${process.env.GUILD_ID            ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] SUPABASE_URL       : ${process.env.SUPABASE_URL        ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] SUPABASE_KEY       : ${process.env.SUPABASE_KEY        ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] R2_ENDPOINT        : ${process.env.R2_ENDPOINT         ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] R2_BUCKET          : ${process.env.R2_BUCKET           ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] R2_FILE            : ${process.env.R2_FILE             ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] R2_ACCESS_KEY_ID   : ${process.env.R2_ACCESS_KEY_ID    ? '✅ défini' : '❌ MANQUANT'}`);
+	console.log(`[Boot] R2_SECRET_ACCESS_KEY: ${process.env.R2_SECRET_ACCESS_KEY ? '✅ défini' : '❌ MANQUANT'}`);
 	console.log(`[Boot] RENDER_EXTERNAL_URL: ${process.env.RENDER_EXTERNAL_URL ?? '⚠️  non défini (keep-alive désactivé)'}`);
 	console.log('[Boot] ═══════════════════════════════════════════════');
-	console.log('[Boot] Téléchargement du save.db depuis Supabase...');
-	supabaseDownload()
+	console.log('[Boot] Téléchargement du save.db depuis Cloudflare R2...');
+	r2Download()
 	  .then(() => {
 		seasonDbReady = true;
-		console.log(`✅ save.db téléchargé depuis Supabase (${(fs.statSync(SEASON_DB_PATH).size / 1024 / 1024).toFixed(1)} Mo)`);
+		console.log(`✅ save.db téléchargé depuis R2 (${(fs.statSync(SEASON_DB_PATH).size / 1024 / 1024).toFixed(1)} Mo)`);
 	  })
 	  .catch((e) => {
 		console.warn(`⚠️  Impossible de télécharger save.db : ${e.message}`);
-		// Si un ancien fichier existe en /tmp (redémarrage chaud), on l'utilise
 		if (fs.existsSync(SEASON_DB_PATH)) {
 		  seasonDbReady = true;
 		  console.log('ℹ️  Utilisation du save.db en cache /tmp');
