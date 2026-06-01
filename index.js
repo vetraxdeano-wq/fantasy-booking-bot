@@ -464,29 +464,21 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  'SELECT COUNT(*) AS cnt FROM TournamentResult WHERE PlayerId=? AND RoundReached=0'
 		).get(tmPlayerId)?.cnt ?? 0;
 
-		// Vérifie si MatchResult existe avant d'essayer la sous-requête adversaire
-		const hasMatchResult = !!s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
-		const lastResultsQuery = hasMatchResult
-		  ? `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
+		// Sous-requête adversaire via table Match (Player1Id/Player2Id + Outcome)
+		const lastResultsQuery = `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
 		    (
 		      SELECT tp2.Firstname || ' ' || tp2.Lastname
-		      FROM MatchResult mr
+		      FROM Match m
 		      JOIN TennisPlayer tp2 ON tp2.Id = CASE
-		        WHEN mr.WinnerId = tr.PlayerId THEN mr.LoserId
-		        ELSE mr.WinnerId
+		        WHEN m.Player1Id = tr.PlayerId THEN m.Player2Id
+		        ELSE m.Player1Id
 		      END
-		      WHERE mr.TournamentId = tr.TournamentId
-		        AND mr.Year = tr.Year
-		        AND (mr.WinnerId = tr.PlayerId OR mr.LoserId = tr.PlayerId)
-		      ORDER BY mr.Date DESC LIMIT 1
+		      WHERE m.TournamentId = tr.TournamentId
+		        AND m.Year = tr.Year
+		        AND (m.Player1Id = tr.PlayerId OR m.Player2Id = tr.PlayerId)
+		        AND m.Outcome IN (2, 3)
+		      ORDER BY m.Date DESC LIMIT 1
 		    ) AS OpponentName
-		    FROM TournamentResult tr
-		    JOIN Tournament t ON t.Id = tr.TournamentId
-		    LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		    WHERE tr.PlayerId = ?
-		    ORDER BY tr.Date DESC LIMIT 5`
-		  : `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
-		    NULL AS OpponentName
 		    FROM TournamentResult tr
 		    JOIN Tournament t ON t.Id = tr.TournamentId
 		    LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
@@ -517,32 +509,32 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const s = openSaveDb();
 	  if (!s) return null;
 	  try {
-		const tableExists = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
-		if (!tableExists) return null;
-
 		const matches = s.prepare(`
-		  SELECT mr.WinnerId, mr.LoserId, mr.Date,
-			t.Name AS TournName, tc.Type AS Category, mr.Surface
-		  FROM MatchResult mr
-		  JOIN Tournament t ON t.Id = mr.TournamentId
-		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		  WHERE mr.WinnerId=? OR mr.LoserId=?
-		  ORDER BY mr.Date DESC LIMIT ?
+		  SELECT m.Player1Id, m.Player2Id, m.Outcome, m.Date,
+			t.Name AS TournName, tc.Type AS Category, m.Surface
+		  FROM Match m
+		  JOIN Tournament t ON t.Id = m.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = m.TournamentCategoryId
+		  WHERE (m.Player1Id=? OR m.Player2Id=?) AND m.Outcome IN (2, 3)
+		  ORDER BY m.Date DESC LIMIT ?
 		`).all(tmId, tmId, n);
 
 		if (!matches.length) return null;
 
-		const wins = matches.filter(m => m.WinnerId === tmId).length;
+		// Outcome=2 → Player1 gagne ; Outcome=3 → Player2 gagne
+		const isWin = (m) => (m.Player1Id === tmId && m.Outcome === 2) || (m.Player2Id === tmId && m.Outcome === 3);
+
+		const wins = matches.filter(isWin).length;
 		const losses = matches.length - wins;
 
 		// Séquence des 5 derniers (pour tendance)
-		const last5 = matches.slice(0, 5).map(m => m.WinnerId === tmId ? '🟢' : '🔴').join('');
+		const last5 = matches.slice(0, 5).map(m => isWin(m) ? '🟢' : '🔴').join('');
 
 		// Série en cours
 		let streak = 0;
 		let streakType = null;
 		for (const m of matches) {
-		  const won = m.WinnerId === tmId;
+		  const won = isWin(m);
 		  if (streakType === null) streakType = won;
 		  if (won === streakType) streak++;
 		  else break;
@@ -558,23 +550,20 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const s = openSaveDb();
 	  if (!s) return [];
 	  try {
-		const tableExists = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
-		if (!tableExists) return [];
-
 		const rivals = s.prepare(`
 		  SELECT
 			opp.Id,
 			opp.Firstname || ' ' || opp.Lastname AS Name,
 			opp.Country,
 			COUNT(*) AS total,
-			SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS wins,
-			SUM(CASE WHEN mr.LoserId=? THEN 1 ELSE 0 END) AS losses
-		  FROM MatchResult mr
-		  JOIN TennisPlayer opp ON opp.Id = CASE WHEN mr.WinnerId=? THEN mr.LoserId ELSE mr.WinnerId END
-		  WHERE mr.WinnerId=? OR mr.LoserId=?
+			SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS wins,
+			SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=3) OR (m.Player2Id=? AND m.Outcome=2) THEN 1 ELSE 0 END) AS losses
+		  FROM Match m
+		  JOIN TennisPlayer opp ON opp.Id = CASE WHEN m.Player1Id=? THEN m.Player2Id ELSE m.Player1Id END
+		  WHERE (m.Player1Id=? OR m.Player2Id=?) AND m.Outcome IN (2, 3)
 		  GROUP BY opp.Id
 		  ORDER BY total DESC LIMIT 3
-		`).all(tmId, tmId, tmId, tmId, tmId);
+		`).all(tmId, tmId, tmId, tmId, tmId, tmId, tmId);
 
 		return rivals;
 	  } catch (e) { console.error('Rivalites error:', e.message); return []; }
@@ -758,38 +747,37 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const s = openSaveDb();
 	  if (!s) return null;
 	  try {
-		// Vérifier que la table existe (saison trop récente = pas encore de matchs)
-		const tableExists = s.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='MatchResult'").get();
-		if (!tableExists) return { wins1: 0, wins2: 0, meetings: [], surfH2H: [] };
-
+		// Outcome=2 → Player1 gagne ; Outcome=3 → Player2 gagne
 		const wins1 = s.prepare(`
-		  SELECT COUNT(*) AS cnt FROM MatchResult
-		  WHERE WinnerId=? AND LoserId=?
-		`).get(id1, id2)?.cnt ?? 0;
+		  SELECT COUNT(*) AS cnt FROM Match
+		  WHERE ((Player1Id=? AND Player2Id=? AND Outcome=2) OR (Player1Id=? AND Player2Id=? AND Outcome=3))
+		`).get(id1, id2, id2, id1)?.cnt ?? 0;
 
 		const wins2 = s.prepare(`
-		  SELECT COUNT(*) AS cnt FROM MatchResult
-		  WHERE WinnerId=? AND LoserId=?
-		`).get(id2, id1)?.cnt ?? 0;
+		  SELECT COUNT(*) AS cnt FROM Match
+		  WHERE ((Player1Id=? AND Player2Id=? AND Outcome=3) OR (Player1Id=? AND Player2Id=? AND Outcome=2))
+		`).get(id1, id2, id2, id1)?.cnt ?? 0;
 
 		const meetings = s.prepare(`
-		  SELECT mr.*, t.Name AS TournName, tc.Type AS Category
-		  FROM MatchResult mr
-		  JOIN Tournament t ON t.Id = mr.TournamentId
-		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		  WHERE (mr.WinnerId=? AND mr.LoserId=?) OR (mr.WinnerId=? AND mr.LoserId=?)
-		  ORDER BY mr.Date DESC LIMIT 10
+		  SELECT m.*, t.Name AS TournName, tc.Type AS Category
+		  FROM Match m
+		  JOIN Tournament t ON t.Id = m.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = m.TournamentCategoryId
+		  WHERE ((m.Player1Id=? AND m.Player2Id=?) OR (m.Player1Id=? AND m.Player2Id=?))
+		    AND m.Outcome IN (2, 3)
+		  ORDER BY m.Date DESC LIMIT 10
 		`).all(id1, id2, id2, id1);
 
 		const surfH2H = s.prepare(`
-		  SELECT mr.Surface, 
-		    SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS w1,
-		    SUM(CASE WHEN mr.WinnerId=? THEN 1 ELSE 0 END) AS w2,
+		  SELECT m.Surface,
+		    SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS w1,
+		    SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=3) OR (m.Player2Id=? AND m.Outcome=2) THEN 1 ELSE 0 END) AS w2,
 		    COUNT(*) AS total
-		  FROM MatchResult mr
-		  WHERE (mr.WinnerId=? AND mr.LoserId=?) OR (mr.WinnerId=? AND mr.LoserId=?)
-		  GROUP BY mr.Surface
-		`).all(id1, id2, id1, id2, id2, id1);
+		  FROM Match m
+		  WHERE ((m.Player1Id=? AND m.Player2Id=?) OR (m.Player1Id=? AND m.Player2Id=?))
+		    AND m.Outcome IN (2, 3)
+		  GROUP BY m.Surface
+		`).all(id1, id1, id1, id1, id1, id2, id2, id1);
 
 		return { wins1, wins2, meetings, surfH2H };
 	  } catch (e) { console.error('H2H error:', e.message); return null; }
@@ -1262,7 +1250,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // Derniers matchs
 	  if (h2h.meetings.length) {
 		const lines = h2h.meetings.map(m => {
-		  const winner = m.WinnerId === p1.Id ? name1 : name2;
+		  const winner = (m.Player1Id === p1.Id && m.Outcome === 2) || (m.Player2Id === p1.Id && m.Outcome === 3) ? name1 : name2;
 		  const cat = normalizeTournCat(m.Category, m.TournName);
 		  const catLabel = TOURN_CAT_EMOJI[cat] ?? '🎾';
 		  return `${catLabel} **${winner}** — ${m.TournName} (${ROUND_LABEL[String(m.Round)] ?? `R${m.Round}`})`;
