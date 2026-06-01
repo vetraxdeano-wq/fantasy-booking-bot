@@ -1573,7 +1573,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  new SlashCommandBuilder()
 		.setName('tournoi')
 		.setDescription("Voir le parcours d'un joueur dans un tournoi (sans année = récap toutes éditions)")
-		.addStringOption(o => o.setName('nom').setDescription('Nom du tournoi (ex: Roland Garros, Wimbledon...)').setRequired(true))
+		.addStringOption(o => o.setName('tournoi').setDescription('Nom du tournoi (ex: Roland Garros, Wimbledon...)').setRequired(true))
+		.addStringOption(o => o.setName('joueur').setDescription('Nom TM2026 du joueur à consulter (toi par défaut)').setRequired(false))
 		.addIntegerOption(o => o.setName('annee').setDescription('Année spécifique (ex: 2026) — optionnel').setRequired(false)),
 	];
 
@@ -2194,16 +2195,67 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
   if (cmd === 'tournoi') {
 	await interaction.deferReply();
 
-	const player = await db.get(interaction.user.id);
-	if (!player?.tm_player_id)
-	  return interaction.editReply({ embeds: [err('Tu n\'as pas de joueur lié. Utilise `/creer-joueur` ou demande à un admin de faire `/link`.')] });
-
-	const nomTournoi = interaction.options.getString('nom').trim();
-	const annee     = interaction.options.getInteger('annee'); // null si pas précisé
-	const tmId      = player.tm_player_id;
-
 	if (!seasonDbReady)
 	  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+
+	const nomTournoi  = interaction.options.getString('tournoi').trim();
+	const nomJoueur   = interaction.options.getString('joueur')?.trim() ?? null;
+	const annee       = interaction.options.getInteger('annee'); // null si pas précisé
+
+	// ── Résolution du joueur cible ─────────────────────────────────────────────
+	let tmId, pDisplayName;
+	const s0 = openSaveDb();
+	if (!s0) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
+	try {
+	  if (nomJoueur) {
+		// Recherche par nom TM dans le save.db
+		const found = s0.prepare(`
+		  SELECT Id, Firstname, Lastname FROM TennisPlayer
+		  WHERE (Firstname LIKE ? OR Lastname LIKE ? OR (Firstname||' '||Lastname) LIKE ?)
+		  LIMIT 5
+		`).all(`%${nomJoueur}%`, `%${nomJoueur}%`, `%${nomJoueur}%`);
+		if (!found.length)
+		  return interaction.editReply({ embeds: [err(`Aucun joueur TM trouvé pour **"${nomJoueur}"**.`)] });
+		if (found.length > 1) {
+		  const list = found.map((r, i) => `${i+1}. **${r.Firstname} ${r.Lastname}**`).join('\n');
+		  return interaction.editReply({ embeds: [
+			new EmbedBuilder().setColor(COLOR.blue)
+			  .setTitle('🔍 Plusieurs joueurs trouvés')
+			  .setDescription(`${list}\n\nPrécise le prénom + nom complet.`)
+		  ] });
+		}
+		tmId = found[0].Id;
+		pDisplayName = `${found[0].Firstname} ${found[0].Lastname}`;
+	  } else {
+		// Joueur Discord de l'utilisateur
+		const player = await db.get(interaction.user.id);
+		if (!player?.tm_player_id)
+		  return interaction.editReply({ embeds: [err('Tu n\'as pas de joueur lié. Utilise `/creer-joueur` ou précise un nom avec l\'option `joueur`.')] });
+		tmId = player.tm_player_id;
+		const pRow = s0.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
+		pDisplayName = pRow ? `${pRow.Firstname} ${pRow.Lastname}` : player.ingame_name ?? `Joueur #${tmId}`;
+	  }
+	} finally { s0.close(); }
+
+	// ── Helper : résolution du label de catégorie (ATP / Junior / etc.) ────────
+	// Tente d'abord TOURN_CAT, sinon lit TournamentCategory dans le save.db
+	function resolveCatLabel(s, categoryId) {
+	  if (TOURN_CAT[categoryId]) return { label: TOURN_CAT[categoryId], isJunior: false };
+	  try {
+		const row = s.prepare('SELECT Name FROM TournamentCategory WHERE Id=? LIMIT 1').get(categoryId);
+		if (row?.Name) {
+		  const isJunior = /junior|juniors/i.test(row.Name);
+		  return { label: row.Name, isJunior };
+		}
+	  } catch {}
+	  // Heuristique sur le nom du tournoi
+	  return { label: `Cat. ${categoryId}`, isJunior: false };
+	}
+
+	// ── Helper : label de catégorie depuis le nom du tournoi ──────────────────
+	function isJuniorTournament(tournName) {
+	  return /junior|juniors/i.test(tournName);
+	}
 
 	// ── Mode sans année : récap global + boutons d'années ──────────────────────
 	if (!annee) {
@@ -2219,6 +2271,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (!tourn)
 		  return interaction.editReply({ embeds: [err(`Tournoi introuvable : **${nomTournoi}**\nEssaie un nom plus précis (ex: \`Roland Garros\`, \`Wimbledon\`, \`US Open\`...)`)] });
 
+		const { label: catLabel, isJunior: catIsJunior } = resolveCatLabel(s, tourn.CategoryId);
+		const isJunior = catIsJunior || isJuniorTournament(tourn.Name);
+		const catEmoji  = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
+		const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
+
 		// Toutes les participations triées par année
 		const participations = s.prepare(`
 		  SELECT tr.Year, tr.RoundReached, tr.MoneyWon, tr.PointsMain, tr.EntryRank
@@ -2228,13 +2285,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		`).all(tourn.Id, tmId);
 
 		if (!participations.length) {
-		  const pRow = s.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
-		  const pName = pRow ? `${pRow.Firstname} ${pRow.Lastname}` : `Joueur #${tmId}`;
 		  return interaction.editReply({ embeds: [
 			new EmbedBuilder()
 			  .setColor(COLOR.blue)
-			  .setTitle(`🎾 ${tourn.Name}`)
-			  .setDescription(`**${pName}** n'a jamais participé à **${tourn.Name}**.`)
+			  .setTitle(`${catEmoji} ${tourn.Name}`)
+			  .setDescription(`**${pDisplayName}** n'a jamais participé à **${tourn.Name}**.`)
 			  .setTimestamp(),
 		  ] });
 		}
@@ -2263,25 +2318,20 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		// Meilleur résultat (RoundReached le plus bas = le meilleur)
 		const bestResult = participations.reduce((best, p) => p.RoundReached < best ? p.RoundReached : best, 99);
 
-		const catLabel = TOURN_CAT[tourn.CategoryId] ?? `Cat. ${tourn.CategoryId}`;
-		const catEmoji = TOURN_CAT_EMOJI[tourn.CategoryId] ?? '🎾';
-		const tmPlayer = s.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
-		const pName    = tmPlayer ? `${tmPlayer.Firstname} ${tmPlayer.Lastname}` : `Joueur #${tmId}`;
-
 		const embed = new EmbedBuilder()
 		  .setColor(titles > 0 ? COLOR.gold : COLOR.tennis)
 		  .setTitle(`${catEmoji} ${tourn.Name} — Bilan carrière`)
-		  .setDescription(`Statistiques de **${pName}** · ${catLabel}`)
+		  .setDescription(`Statistiques de **${pDisplayName}** · ${catLabel} · **${circuitTag}**`)
 		  .addFields(
 			{ name: '📅 Éditions',           value: `**${participations.length}** participation${participations.length > 1 ? 's' : ''}`, inline: true },
-			{ name: '🏆 Titres',             value: `**${titles}**`,  inline: true },
-			{ name: '🥈 Finales',            value: `**${finals}**`,  inline: true },
-			{ name: '🥉 Demi-finales',       value: `**${semis}**`,   inline: true },
-			{ name: '⚡ Quarts de finale',   value: `**${qf}**`,      inline: true },
-			{ name: '🎯 Meilleur résultat',  value: ROUND_LABEL[String(bestResult)] ?? `Tour ${bestResult}`, inline: true },
-			{ name: '🎾 Bilan matchs',       value: `**${wins}V / ${losses}D** (${wr}% winrate)`, inline: true },
-			{ name: '💰 Prize money total',  value: totalMoney > 0 ? totalMoney.toLocaleString('fr-FR') + ' $' : '—', inline: true },
-			{ name: '📊 Points ATP totaux',  value: totalPts > 0 ? totalPts.toLocaleString() : '—', inline: true },
+			{ name: `🏆 Titres ${circuitTag}`,  value: `**${titles}**`,  inline: true },
+			{ name: `🥈 Finales ${circuitTag}`, value: `**${finals}**`,  inline: true },
+			{ name: '🥉 Demi-finales',         value: `**${semis}**`,   inline: true },
+			{ name: '⚡ Quarts de finale',      value: `**${qf}**`,      inline: true },
+			{ name: '🎯 Meilleur résultat',     value: ROUND_LABEL[String(bestResult)] ?? `Tour ${bestResult}`, inline: true },
+			{ name: `🎾 Bilan matchs ${circuitTag}`, value: `**${wins}V / ${losses}D** (${wr}% winrate)`, inline: true },
+			{ name: '💰 Prize money total',     value: totalMoney > 0 ? totalMoney.toLocaleString('fr-FR') + ' $' : '—', inline: true },
+			{ name: isJunior ? '📊 Points Junior totaux' : '📊 Points ATP totaux', value: totalPts > 0 ? totalPts.toLocaleString() : '—', inline: true },
 		  )
 		  .setFooter({ text: 'Tennis Manager 2026 · /tournoi — Clique sur une année pour le détail du parcours' })
 		  .setTimestamp();
@@ -2296,7 +2346,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (yearLines)
 		  embed.addFields({ name: '📋 Historique par édition', value: yearLines.length <= 1024 ? yearLines : yearLines.slice(0, 1021) + '…' });
 
-		// Boutons d'années (max 5 par ligne ActionRow, max 5 lignes = 25 boutons)
+		// Boutons d'années — on encode aussi le tmId pour que le bouton sache quel joueur afficher
 		const years = participations.map(p => p.Year);
 		const components = [];
 		for (let i = 0; i < Math.min(years.length, 25); i += 5) {
@@ -2304,7 +2354,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  for (const yr of years.slice(i, i + 5)) {
 			row.addComponents(
 			  new ButtonBuilder()
-				.setCustomId(`tournoi_year:${tourn.Id}:${yr}`)
+				.setCustomId(`tournoi_year:${tourn.Id}:${yr}:${tmId}`)
 				.setLabel(String(yr))
 				.setStyle(ButtonStyle.Secondary)
 			);
@@ -2318,23 +2368,26 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  }
 	}
 
-	// ── Mode avec année : parcours détaillé (comportement original) ────────────
+	// ── Mode avec année : parcours détaillé ────────────────────────────────────
 	const s = openSaveDb();
 	if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
 
 	try {
-	  // Recherche partielle insensible à la casse
 	  const tourn = s.prepare(`
 		SELECT Id, Name, CategoryId FROM Tournament
 		WHERE Name LIKE ? COLLATE NOCASE
-		ORDER BY CategoryId ASC
-		LIMIT 1
+		ORDER BY CategoryId ASC LIMIT 1
 	  `).get(`%${nomTournoi}%`);
 
 	  if (!tourn)
 		return interaction.editReply({ embeds: [err(`Tournoi introuvable : **${nomTournoi}**\nEssaie un nom plus précis (ex: \`Roland Garros\`, \`Wimbledon\`, \`US Open\`...)`)] });
 
-	  // Résultat global du joueur dans ce tournoi
+	  const { label: catLabel, isJunior: catIsJunior } = resolveCatLabel(s, tourn.CategoryId);
+	  const isJunior   = catIsJunior || isJuniorTournament(tourn.Name);
+	  const catEmoji   = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
+	  const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
+	  const ptsLabel   = isJunior ? 'Points Junior' : 'Points ATP';
+
 	  const result = s.prepare(`
 		SELECT tr.RoundReached, tr.EntryMode, tr.MoneyWon, tr.PointsMain, tr.EntryRank
 		FROM TournamentResult tr
@@ -2342,13 +2395,11 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  `).get(tourn.Id, tmId, annee);
 
 	  if (!result) {
-		const p = s.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
-		const name = p ? `${p.Firstname} ${p.Lastname}` : `Joueur #${tmId}`;
 		return interaction.editReply({ embeds: [
 		  new EmbedBuilder()
 			.setColor(COLOR.blue)
-			.setTitle(`🎾 ${tourn.Name} ${annee}`)
-			.setDescription(`**${name}** n'a pas participé à ce tournoi en **${annee}**.`)
+			.setTitle(`${catEmoji} ${tourn.Name} ${annee}`)
+			.setDescription(`**${pDisplayName}** n'a pas participé à ce tournoi en **${annee}**.`)
 			.setTimestamp(),
 		] });
 	  }
@@ -2381,14 +2432,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  };
 	  const ENTRY_MODE = { 0: 'Direct', 1: 'Wild Card', 2: 'Qualifié', 3: 'Lucky Loser', 4: 'Invité', 5: 'Protégé' };
 
-	  // Lignes matchs
 	  const matchLines = matches.map(m => {
 		const isP1    = m.Player1Id === tmId;
 		const oppName = isP1
 		  ? (m.P2First ? `${m.P2First} ${m.P2Last}` : 'Inconnu')
 		  : (m.P1First ? `${m.P1First} ${m.P1Last}` : 'Inconnu');
 		const won = (isP1 && m.Outcome === 2) || (!isP1 && m.Outcome === 3);
-
 		const sets = [
 		  [m.Player1Set1Score, m.Player2Set1Score],
 		  [m.Player1Set2Score, m.Player2Set2Score],
@@ -2396,35 +2445,28 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  [m.Player1Set4Score, m.Player2Set4Score],
 		  [m.Player1Set5Score, m.Player2Set5Score],
 		].filter(([a, b]) => a !== null && b !== null);
-
 		const scoreStr = sets.map(([a, b]) => isP1 ? `${a}-${b}` : `${b}-${a}`).join('  ');
 		const roundLabel = m.Round === 0 && result.RoundReached === -1
 		  ? '🏆 Finale (Victoire)'
 		  : (MATCH_ROUND_LABEL[String(m.Round)] ?? `Tour ${m.Round}`);
-
 		return `${won ? '✅' : '❌'} **${roundLabel}** — ${won ? 'bat' : 'perd vs'} **${oppName}**${scoreStr ? `  \`${scoreStr}\`` : ''}`;
 	  });
 
-	  // Embed
-	  const catLabel  = TOURN_CAT[tourn.CategoryId] ?? `Cat. ${tourn.CategoryId}`;
-	  const catEmoji  = TOURN_CAT_EMOJI[tourn.CategoryId] ?? '🎾';
-	  const tmPlayer  = s.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
-	  const pName     = tmPlayer ? `${tmPlayer.Firstname} ${tmPlayer.Lastname}` : `Joueur #${tmId}`;
-	  const rrLabel   = ROUND_LABEL[String(result.RoundReached)] ?? `Tour ${result.RoundReached}`;
-	  const entryStr  = ENTRY_MODE[result.EntryMode] ?? `Mode ${result.EntryMode}`;
-	  const rankStr   = result.EntryRank > 0 ? ` (#${result.EntryRank} à l'entrée)` : '';
+	  const rrLabel  = ROUND_LABEL[String(result.RoundReached)] ?? `Tour ${result.RoundReached}`;
+	  const entryStr = ENTRY_MODE[result.EntryMode] ?? `Mode ${result.EntryMode}`;
+	  const rankStr  = result.EntryRank > 0 ? ` (#${result.EntryRank} à l'entrée)` : '';
 
 	  const summaryLines = [
 		`🏁 **Résultat :** ${rrLabel}`,
 		`🎟️ **Entrée :** ${entryStr}${rankStr}`,
 		result.MoneyWon > 0 ? `💰 **Prize money :** ${result.MoneyWon.toLocaleString('fr-FR')} $` : null,
-		result.PointsMain > 0 ? `📊 **Points ATP :** ${result.PointsMain}` : null,
+		result.PointsMain > 0 ? `📊 **${ptsLabel} :** ${result.PointsMain}` : null,
 	  ].filter(Boolean).join('\n');
 
 	  const embed = new EmbedBuilder()
 		.setColor(result.RoundReached === -1 ? COLOR.gold : COLOR.tennis)
-		.setTitle(`${catEmoji} ${tourn.Name} ${annee}`)
-		.setDescription(`Parcours de **${pName}** · ${catLabel}`)
+		.setTitle(`${catEmoji} ${tourn.Name} ${annee} · ${circuitTag}`)
+		.setDescription(`Parcours de **${pDisplayName}** · ${catLabel}`)
 		.addFields({ name: '📋 Résumé', value: summaryLines, inline: false })
 		.setFooter({ text: 'Tennis Manager 2026 · /tournoi' })
 		.setTimestamp();
@@ -2442,7 +2484,6 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  s.close();
 	}
   }
-
 
   if (cmd === 'admin') {
 		const sub = interaction.options.getSubcommand();
@@ -3699,21 +3740,42 @@ function buildProfilNavButtons(tmName) {
 	if (!interaction.isButton()) return;
 	if (!interaction.customId.startsWith('tournoi_year:')) return;
 
-	const parts    = interaction.customId.split(':');
-	const tournId  = parseInt(parts[1], 10);
-	const annee    = parseInt(parts[2], 10);
+	const parts   = interaction.customId.split(':');
+	const tournId = parseInt(parts[1], 10);
+	const annee   = parseInt(parts[2], 10);
+	// parts[3] = tmId encodé dans le bouton (peut être absent pour vieux boutons)
+	const encodedTmId = parts[3] ? parseInt(parts[3], 10) : null;
+
 	if (isNaN(tournId) || isNaN(annee)) return;
 
 	await interaction.deferReply({ ephemeral: true });
 
-	const player = await db.get(interaction.user.id);
-	if (!player?.tm_player_id)
-	  return interaction.editReply({ embeds: [err('Tu n\'as pas de joueur lié.')] });
-
 	if (!seasonDbReady)
 	  return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
 
-	const tmId = player.tm_player_id;
+	// Résolution du joueur : tmId encodé dans le bouton, sinon Discord de l'utilisateur
+	let tmId, pDisplayName;
+	if (encodedTmId && !isNaN(encodedTmId)) {
+	  tmId = encodedTmId;
+	  const s0 = openSaveDb();
+	  if (!s0) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
+	  try {
+		const pRow = s0.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
+		pDisplayName = pRow ? `${pRow.Firstname} ${pRow.Lastname}` : `Joueur #${tmId}`;
+	  } finally { s0.close(); }
+	} else {
+	  const player = await db.get(interaction.user.id);
+	  if (!player?.tm_player_id)
+		return interaction.editReply({ embeds: [err('Tu n\'as pas de joueur lié.')] });
+	  tmId = player.tm_player_id;
+	  const s0 = openSaveDb();
+	  if (!s0) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
+	  try {
+		const pRow = s0.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
+		pDisplayName = pRow ? `${pRow.Firstname} ${pRow.Lastname}` : `Joueur #${tmId}`;
+	  } finally { s0.close(); }
+	}
+
 	const s = openSaveDb();
 	if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
 
@@ -3721,6 +3783,21 @@ function buildProfilNavButtons(tmName) {
 	  const tourn = s.prepare('SELECT Id, Name, CategoryId FROM Tournament WHERE Id=?').get(tournId);
 	  if (!tourn)
 		return interaction.editReply({ embeds: [err('Tournoi introuvable.')] });
+
+	  // Résolution catégorie
+	  let catLabel = TOURN_CAT[tourn.CategoryId];
+	  let isJunior = false;
+	  if (!catLabel) {
+		try {
+		  const row = s.prepare('SELECT Name FROM TournamentCategory WHERE Id=? LIMIT 1').get(tourn.CategoryId);
+		  if (row?.Name) { catLabel = row.Name; isJunior = /junior|juniors/i.test(row.Name); }
+		} catch {}
+		catLabel = catLabel ?? `Cat. ${tourn.CategoryId}`;
+	  }
+	  if (!isJunior) isJunior = /junior|juniors/i.test(tourn.Name);
+	  const catEmoji   = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
+	  const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
+	  const ptsLabel   = isJunior ? 'Points Junior' : 'Points ATP';
 
 	  const result = s.prepare(`
 		SELECT tr.RoundReached, tr.EntryMode, tr.MoneyWon, tr.PointsMain, tr.EntryRank
@@ -3778,10 +3855,6 @@ function buildProfilNavButtons(tmName) {
 		return `${won ? '✅' : '❌'} **${roundLabel}** — ${won ? 'bat' : 'perd vs'} **${oppName}**${scoreStr ? `  \`${scoreStr}\`` : ''}`;
 	  });
 
-	  const catLabel = TOURN_CAT[tourn.CategoryId] ?? `Cat. ${tourn.CategoryId}`;
-	  const catEmoji = TOURN_CAT_EMOJI[tourn.CategoryId] ?? '🎾';
-	  const tmPlayer = s.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
-	  const pName    = tmPlayer ? `${tmPlayer.Firstname} ${tmPlayer.Lastname}` : `Joueur #${tmId}`;
 	  const rrLabel  = ROUND_LABEL[String(result.RoundReached)] ?? `Tour ${result.RoundReached}`;
 	  const entryStr = ENTRY_MODE[result.EntryMode] ?? `Mode ${result.EntryMode}`;
 	  const rankStr  = result.EntryRank > 0 ? ` (#${result.EntryRank} à l'entrée)` : '';
@@ -3790,13 +3863,13 @@ function buildProfilNavButtons(tmName) {
 		`🏁 **Résultat :** ${rrLabel}`,
 		`🎟️ **Entrée :** ${entryStr}${rankStr}`,
 		result.MoneyWon > 0 ? `💰 **Prize money :** ${result.MoneyWon.toLocaleString('fr-FR')} $` : null,
-		result.PointsMain > 0 ? `📊 **Points ATP :** ${result.PointsMain}` : null,
+		result.PointsMain > 0 ? `📊 **${ptsLabel} :** ${result.PointsMain}` : null,
 	  ].filter(Boolean).join('\n');
 
 	  const embed = new EmbedBuilder()
 		.setColor(result.RoundReached === -1 ? COLOR.gold : COLOR.tennis)
-		.setTitle(`${catEmoji} ${tourn.Name} ${annee}`)
-		.setDescription(`Parcours de **${pName}** · ${catLabel}`)
+		.setTitle(`${catEmoji} ${tourn.Name} ${annee} · ${circuitTag}`)
+		.setDescription(`Parcours de **${pDisplayName}** · ${catLabel}`)
 		.addFields({ name: '📋 Résumé', value: summaryLines, inline: false })
 		.setFooter({ text: 'Tennis Manager 2026 · /tournoi' })
 		.setTimestamp();
@@ -3813,7 +3886,6 @@ function buildProfilNavButtons(tmName) {
 	  s.close();
 	}
   });
-
 
 	  	  // ── Autocomplete ──────────────────────────────────────────────────────────────
 	  client.on('interactionCreate', async (interaction) => {
