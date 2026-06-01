@@ -96,68 +96,42 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	//    R2_SECRET_ACCESS_KEY → Secret Access Key R2
 	// ══════════════════════════════════════════════════════════════════════════════
 
-	function r2Download() {
-	  return new Promise((resolve, reject) => {
-		const { R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
-		if (!R2_ENDPOINT || !R2_BUCKET || !R2_FILE || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
-		  return reject(new Error('Variables R2 manquantes (R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)'));
-		}
+	async function r2Download() {
+	  const { R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY } = process.env;
+	  if (!R2_ENDPOINT || !R2_BUCKET || !R2_FILE || !R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY) {
+	    throw new Error('Variables R2 manquantes (R2_ENDPOINT, R2_BUCKET, R2_FILE, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY)');
+	  }
 
-		// Signature AWS4-HMAC-SHA256 (R2 est compatible S3)
-		const crypto = require('crypto');
-		// Nettoyer l'endpoint (retirer trailing slash éventuel) pour éviter double-slash → SSL handshake failure
-		const endpoint = R2_ENDPOINT.replace(/\/+$/, '');
-		const url    = new URL(`${endpoint}/${R2_BUCKET}/${encodeURIComponent(R2_FILE)}`);
+	  // Utilise le SDK AWS officiel — gère TLS/Cloudflare R2 correctement (évite SSL handshake failure du https natif)
+	  const { S3Client, GetObjectCommand } = require('@aws-sdk/client-s3');
+	  const { Readable } = require('stream');
 
-		const now        = new Date();
-		const dateShort  = now.toISOString().slice(0, 10).replace(/-/g, '');   // YYYYMMDD
-		const dateLong   = now.toISOString().replace(/[:-]/g, '').slice(0, 15) + 'Z'; // YYYYMMDDTHHmmssZ
-		const region     = 'auto';
-		const service    = 's3';
+	  const endpoint = R2_ENDPOINT.replace(/\/+$/, '');
+	  console.log(`[R2] Endpoint : ${endpoint} | Bucket : ${R2_BUCKET} | File : ${R2_FILE}`);
 
-		const canonicalHeaders = `host:${url.hostname}\nx-amz-date:${dateLong}\n`;
-		const signedHeaders    = 'host;x-amz-date';
-		const payloadHash      = 'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855'; // SHA256('')
+	  const s3 = new S3Client({
+	    region: 'auto',
+	    endpoint,
+	    credentials: {
+	      accessKeyId:     R2_ACCESS_KEY_ID,
+	      secretAccessKey: R2_SECRET_ACCESS_KEY,
+	    },
+	    forcePathStyle: true, // Cloudflare R2 requiert path-style
+	  });
 
-		const canonicalRequest = [
-		  'GET',
-		  url.pathname,
-		  '',
-		  canonicalHeaders,
-		  signedHeaders,
-		  payloadHash,
-		].join('\n');
+	  const cmd  = new GetObjectCommand({ Bucket: R2_BUCKET, Key: R2_FILE });
+	  const resp = await s3.send(cmd);
 
-		const credentialScope = `${dateShort}/${region}/${service}/aws4_request`;
-		const stringToSign    = [
-		  'AWS4-HMAC-SHA256',
-		  dateLong,
-		  credentialScope,
-		  crypto.createHash('sha256').update(canonicalRequest).digest('hex'),
-		].join('\n');
-
-		const hmac = (key, data) => crypto.createHmac('sha256', key).update(data).digest();
-		const signingKey = hmac(hmac(hmac(hmac('AWS4' + R2_SECRET_ACCESS_KEY, dateShort), region), service), 'aws4_request');
-		const signature  = crypto.createHmac('sha256', signingKey).update(stringToSign).digest('hex');
-
-		const authorization = `AWS4-HMAC-SHA256 Credential=${R2_ACCESS_KEY_ID}/${credentialScope}, SignedHeaders=${signedHeaders}, Signature=${signature}`;
-
-		const file = fs.createWriteStream(SEASON_DB_PATH);
-		const req  = https.get(url.href, {
-		  headers: {
-			'x-amz-date':    dateLong,
-			'Authorization': authorization,
-		  }
-		}, (res) => {
-		  if (res.statusCode !== 200) {
-			file.close();
-			fs.unlink(SEASON_DB_PATH, () => {});
-			return reject(new Error(`R2 HTTP ${res.statusCode}`));
-		  }
-		  res.pipe(file);
-		  file.on('finish', () => { file.close(); resolve(); });
-		});
-		req.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
+	  await new Promise((resolve, reject) => {
+	    const file = fs.createWriteStream(SEASON_DB_PATH);
+	    const body = resp.Body;
+	    if (!body) return reject(new Error('R2 : Body vide dans la réponse'));
+	    // resp.Body est un ReadableStream web (SDK v3) — convertir en Node stream
+	    const nodeStream = body instanceof Readable ? body : Readable.fromWeb(body);
+	    nodeStream.pipe(file);
+	    file.on('finish', () => { file.close(); resolve(); });
+	    file.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
+	    nodeStream.on('error', (e) => { fs.unlink(SEASON_DB_PATH, () => {}); reject(e); });
 	  });
 	}
 
