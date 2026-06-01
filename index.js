@@ -105,7 +105,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		// Signature AWS4-HMAC-SHA256 (R2 est compatible S3)
 		const crypto = require('crypto');
-		const url    = new URL(`${R2_ENDPOINT}/${R2_BUCKET}/${R2_FILE}`);
+		// Nettoyer l'endpoint (retirer trailing slash éventuel) pour éviter double-slash → SSL handshake failure
+		const endpoint = R2_ENDPOINT.replace(/\/+$/, '');
+		const url    = new URL(`${endpoint}/${R2_BUCKET}/${encodeURIComponent(R2_FILE)}`);
 
 		const now        = new Date();
 		const dateShort  = now.toISOString().slice(0, 10).replace(/-/g, '');   // YYYYMMDD
