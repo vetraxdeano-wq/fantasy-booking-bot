@@ -442,17 +442,30 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		).get(tmPlayerId) : null;
 		const bestRankJunior = bestRankJuniorRow?.BestRank != null ? bestRankJuniorRow.BestRank + 1 : null;
 
-		// Stats Junior (Circuit=1) — détection junior uniquement sur t.Name (tc.Name inexistant)
+		// Détection des catégories junior (JA, J1, J2, J3... + "junior" dans le nom)
+		const juniorCatIds = getJuniorCategoryIds(s);
+		const { clause: jExcl, ids: jIds } = buildJuniorExcludeClause(juniorCatIds);
+		const { clause: jIncl, ids: jIdsIncl } = (() => {
+		  const nameFilter = `(lower(t.Name) LIKE '%junior%'
+			OR t.Name LIKE 'J %' OR t.Name LIKE 'J-%'
+			OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*')`;
+		  if (juniorCatIds.size === 0) return { clause: nameFilter, ids: [] };
+		  const ids = [...juniorCatIds];
+		  const ph  = ids.map(() => '?').join(',');
+		  return { clause: `(t.CategoryId IN (${ph}) OR ${nameFilter})`, ids };
+		})();
+
+		// Stats Junior (Circuit=1)
 		const statsJunior = s.prepare(`
 		  SELECT
 			SUM(MatchPlayed) AS played, SUM(MatchWon) AS won,
 			(SELECT COUNT(*) FROM TournamentResult tr2
 			 JOIN Tournament t2 ON t2.Id = tr2.TournamentId
 			 WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
-			   AND lower(t2.Name) LIKE '%junior%'
+			   AND ${jIncl.replace(/\bt\b/g, 't2')}
 			) AS titles
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
-		`).get(tmPlayerId, tmPlayerId) ?? {};
+		`).get(...jIdsIncl.length ? [tmPlayerId, ...jIdsIncl, tmPlayerId] : [tmPlayerId, tmPlayerId]) ?? {};
 
 		const stats = s.prepare(`
 		  SELECT
@@ -480,16 +493,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const titles = s.prepare(`
 		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
-		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
-		    AND lower(t.Name) NOT LIKE '%junior%'
-		`).get(tmPlayerId)?.cnt ?? 0;
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jExcl}
+		`).get(tmPlayerId, ...jIds)?.cnt ?? 0;
 
 		const finals = s.prepare(`
 		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
-		  WHERE tr.PlayerId=? AND tr.RoundReached=0
-		    AND lower(t.Name) NOT LIKE '%junior%'
-		`).get(tmPlayerId)?.cnt ?? 0;
+		  WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jExcl}
+		`).get(tmPlayerId, ...jIds)?.cnt ?? 0;
 
 		// Sous-requête adversaire via table Match (Player1Id/Player2Id + Outcome)
 		const lastResultsQuery = `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
@@ -838,39 +849,68 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  return { sel: 'NULL AS Category', join: '', ord: '' };
 	}
 
+	// Retourne un Set des CategoryId juniors dans ce save.db
+	// Sont considérés juniors : tournois dont le nom contient "junior" ou commence par J suivi d'un chiffre/lettre (JA, J1, J2...)
+	function getJuniorCategoryIds(s) {
+	  const ids = new Set();
+	  try {
+		const rows = s.prepare(`
+		  SELECT DISTINCT t.CategoryId FROM Tournament t
+		  WHERE lower(t.Name) LIKE '%junior%'
+		     OR t.Name LIKE 'J %' OR t.Name LIKE 'J-%'
+		     OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*'
+		`).all();
+		for (const r of rows) if (r.CategoryId != null) ids.add(r.CategoryId);
+	  } catch (e) { console.error('[JuniorCat] Erreur:', e.message); }
+	  return ids;
+	}
+
+	// Génère WHERE fragment + params pour exclure les tournois juniors
+	function buildJuniorExcludeClause(juniorCatIds) {
+	  const nameFilter = `(lower(t.Name) NOT LIKE '%junior%'
+		AND t.Name NOT LIKE 'J %' AND t.Name NOT LIKE 'J-%'
+		AND t.Name NOT GLOB 'J[0-9]*' AND t.Name NOT GLOB 'J[A-Z]*')`;
+	  if (juniorCatIds.size === 0) return { clause: nameFilter, ids: [] };
+	  const ids = [...juniorCatIds];
+	  const ph  = ids.map(() => '?').join(',');
+	  return { clause: `(t.CategoryId NOT IN (${ph}) AND ${nameFilter})`, ids };
+	}
+
 	// Palmarès filtré par catégorie (Grand Chelem, Masters 1000, etc.)
 	function getTmPalmares(tmId) {
 	  const s = openSaveDb();
 	  if (!s) return null;
 	  try {
 		const { sel: catSel, join: catJoin, ord: catOrd } = getTournCategoryJoin(s);
+		const juniorCatIds = getJuniorCategoryIds(s);
+		const { clause: jExcl, ids: jIds } = buildJuniorExcludeClause(juniorCatIds);
 
 		const titles = s.prepare(`
 		  SELECT t.Name, ${catSel}, tr.Year, tr.MoneyWon, tr.RoundReached
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  ${catJoin}
-		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jExcl}
 		  ORDER BY ${catOrd} tr.Year DESC
-		`).all(tmId);
+		`).all(tmId, ...jIds);
 
 		const finals = s.prepare(`
 		  SELECT t.Name, ${catSel}, tr.Year, tr.RoundReached
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  ${catJoin}
-		  WHERE tr.PlayerId=? AND tr.RoundReached=0
+		  WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jExcl}
 		  ORDER BY ${catOrd} tr.Year DESC
-		`).all(tmId);
+		`).all(tmId, ...jIds);
 
 		const sf = s.prepare(`
 		  SELECT t.Name, ${catSel}, tr.Year, tr.RoundReached
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  ${catJoin}
-		  WHERE tr.PlayerId=? AND tr.RoundReached=1
+		  WHERE tr.PlayerId=? AND tr.RoundReached=1 AND ${jExcl}
 		  ORDER BY ${catOrd} tr.Year DESC
-		`).all(tmId);
+		`).all(tmId, ...jIds);
 
 		const byCategory = {};
 		for (const r of titles) {
