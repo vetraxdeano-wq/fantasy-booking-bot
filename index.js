@@ -510,6 +510,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		`).get(tmPlayerId, ...jIds)?.cnt ?? 0;
 
 		// Sous-requête adversaire via table Match (Player1Id/Player2Id + Outcome)
+		// ⚠️ On exclut les tournois juniors (même filtre que pour titles/finals)
 		const lastResultsQuery = `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
 		    (
 		      SELECT tp2.Firstname || ' ' || tp2.Lastname
@@ -527,9 +528,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		    FROM TournamentResult tr
 		    JOIN Tournament t ON t.Id = tr.TournamentId
 		    LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		    WHERE tr.PlayerId = ?
+		    WHERE tr.PlayerId = ? AND ${jExcl}
 		    ORDER BY tr.Date DESC LIMIT 5`;
-		const lastResults = s.prepare(lastResultsQuery).all(tmPlayerId);
+		const lastResults = s.prepare(lastResultsQuery).all(tmPlayerId, ...jIds);
 
 		const totalMoney = s.prepare(
 		  'SELECT SUM(MoneyWon) AS total FROM TournamentResult WHERE PlayerId=?'
@@ -539,6 +540,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const injuries = s.prepare(
 		  'SELECT Zone, Type FROM Injury WHERE PlayerId=? AND IsActive=1'
 		).all(tmPlayerId);
+
+		console.log(`[TmData] Joueur ${tmPlayerId} — titres ATP: ${titles}, finales ATP: ${finals}, juniorCatIds: [${[...juniorCatIds].join(',')}], jIds: [${jIds.join(',')}]`);
 
 		return { p, rank, race, bestRank, rankJunior, bestRankJunior, statsJunior, stats, surfStats, titles, finals, lastResults, totalMoney, injuries };
 	  } catch (e) {
@@ -858,6 +861,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	// Retourne un Set des CategoryId juniors dans ce save.db
 	// Sont considérés juniors : tournois dont le nom contient "junior" ou commence par J suivi d'un chiffre/lettre (JA, J1, J2...)
+	// OU dont la catégorie a un Type >= 10 (catégories juniors dans TM2026 : 10=JA, 11=J1, 12=J2, 13=J3...)
 	function getJuniorCategoryIds(s) {
 	  const ids = new Set();
 	  try {
@@ -868,6 +872,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		     OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*'
 		`).all();
 		for (const r of rows) if (r.CategoryId != null) ids.add(r.CategoryId);
+
+		// Ajouter aussi les CategoryId dont le Type >= 10 (juniors TM2026)
+		try {
+		  const catRows = s.prepare(`
+			SELECT DISTINCT Id FROM TournamentCategory WHERE Type >= 10
+		  `).all();
+		  for (const r of catRows) if (r.Id != null) ids.add(r.Id);
+		} catch (_) { /* TournamentCategory peut ne pas avoir de colonne Type */ }
 	  } catch (e) { console.error('[JuniorCat] Erreur:', e.message); }
 	  return ids;
 	}
