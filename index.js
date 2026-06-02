@@ -463,11 +463,17 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			 JOIN Tournament t2 ON t2.Id = tr2.TournamentId
 			 WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
 			   AND ${jIncl.replace(/\bt\b/g, 't2')}
+			   AND t2.Name IS NOT NULL AND trim(t2.Name) != ''
+			   AND lower(t2.Name) NOT LIKE '%estimated%'
+			   AND lower(t2.Name) NOT LIKE '%unknown%'
 			) AS titles,
 			(SELECT COUNT(*) FROM TournamentResult tr3
 			 JOIN Tournament t3 ON t3.Id = tr3.TournamentId
 			 WHERE tr3.PlayerId=? AND tr3.RoundReached=0
 			   AND ${jIncl.replace(/\bt\b/g, 't3')}
+			   AND t3.Name IS NOT NULL AND trim(t3.Name) != ''
+			   AND lower(t3.Name) NOT LIKE '%estimated%'
+			   AND lower(t3.Name) NOT LIKE '%unknown%'
 			) AS finals
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
 		`).get(...jIdsIncl.length
@@ -501,12 +507,18 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
 		  WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jExcl}
+		    AND t.Name IS NOT NULL AND trim(t.Name) != ''
+		    AND lower(t.Name) NOT LIKE '%estimated%'
+		    AND lower(t.Name) NOT LIKE '%unknown%'
 		`).get(tmPlayerId, ...jIds)?.cnt ?? 0;
 
 		const finals = s.prepare(`
 		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
 		  WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jExcl}
+		    AND t.Name IS NOT NULL AND trim(t.Name) != ''
+		    AND lower(t.Name) NOT LIKE '%estimated%'
+		    AND lower(t.Name) NOT LIKE '%unknown%'
 		`).get(tmPlayerId, ...jIds)?.cnt ?? 0;
 
 		// Sous-requête adversaire via table Match (Player1Id/Player2Id + Outcome)
@@ -910,6 +922,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  ${catJoin}
 		  WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jExcl}
+		    AND t.Name IS NOT NULL AND trim(t.Name) != ''
+		    AND lower(t.Name) NOT LIKE '%estimated%'
+		    AND lower(t.Name) NOT LIKE '%unknown%'
 		  ORDER BY ${catOrd} tr.Year DESC
 		`).all(tmId, ...jIds);
 
@@ -919,6 +934,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  ${catJoin}
 		  WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jExcl}
+		    AND t.Name IS NOT NULL AND trim(t.Name) != ''
+		    AND lower(t.Name) NOT LIKE '%estimated%'
+		    AND lower(t.Name) NOT LIKE '%unknown%'
 		  ORDER BY ${catOrd} tr.Year DESC
 		`).all(tmId, ...jIds);
 
@@ -938,6 +956,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jIncl2}
+		    AND t.Name IS NOT NULL AND trim(t.Name) != ''
+		    AND lower(t.Name) NOT LIKE '%estimated%'
+		    AND lower(t.Name) NOT LIKE '%unknown%'
 		  ORDER BY tr.Year DESC
 		`).all(tmId, ...jIdsIncl2);
 
@@ -946,6 +967,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id=tr.TournamentId
 		  WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jIncl2}
+		    AND t.Name IS NOT NULL AND trim(t.Name) != ''
+		    AND lower(t.Name) NOT LIKE '%estimated%'
+		    AND lower(t.Name) NOT LIKE '%unknown%'
 		  ORDER BY tr.Year DESC
 		`).all(tmId, ...jIdsIncl2);
 
@@ -1235,8 +1259,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '📊 Bilan ATP', value: stats.played ? `**${stats.won}V** / ${stats.played - stats.won}D (${pct(stats.won, stats.played)})` : '—', inline: true },
 	  );
 
-	  // Bilan Junior si dispo
-	  if (hasJunior && (statsJunior.played > 0 || statsJunior.titles > 0)) {
+	  // Bilan Junior si le joueur a des données juniors (même s'il est passé pro)
+	  if ((statsJunior?.played ?? 0) > 0 || (statsJunior?.titles ?? 0) > 0 || (statsJunior?.finals ?? 0) > 0) {
 		embed.addFields(
 		  { name: '🎓 Titres Junior',  value: `**${statsJunior.titles ?? 0}**`,  inline: true },
 		  { name: '🥈 Finales Junior', value: `**${statsJunior.finals ?? 0}**`,  inline: true },
