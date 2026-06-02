@@ -477,22 +477,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		    AND lower(t3.Name) NOT LIKE '%unknown%'
 		`).get(...[tmPlayerId, ...jIdsIncl])?.cnt ?? 0;
 
-		// Bilan V/D junior via table Match (fiable même si TennisPlayerStatistics est vide)
-		const statsJuniorBilan = (() => {
-		  if (juniorCatIds.size === 0) return { played: 0, won: 0 };
-		  const jph = [...juniorCatIds].map(() => '?').join(',');
-		  const row = s.prepare(`
-		    SELECT
-		      COUNT(*) AS played,
-		      SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS won
-		    FROM Match m
-		    JOIN Tournament t ON t.Id = m.TournamentId
-		    WHERE (m.Player1Id=? OR m.Player2Id=?)
-		      AND m.Outcome IN (2,3)
-		      AND t.CategoryId IN (${jph})
-		  `).get(tmPlayerId, tmPlayerId, tmPlayerId, tmPlayerId, ...[...juniorCatIds]);
-		  return { played: row?.played ?? 0, won: row?.won ?? 0 };
-		})();
+		// Bilan V/D junior via TennisPlayerStatistics Circuit=1 (direct et fiable dans TM2026)
+		const statsJuniorBilanRow = s.prepare(`
+		  SELECT SUM(MatchPlayed) AS played, SUM(MatchWon) AS won
+		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
+		`).get(tmPlayerId) ?? {};
+		const statsJuniorBilan = {
+		  played: statsJuniorBilanRow.played ?? 0,
+		  won:    statsJuniorBilanRow.won ?? 0,
+		};
 
 		const statsJunior = {
 		  titles: statsJuniorTitles,
@@ -589,9 +582,13 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  }
 		}
 
-		const totalMoney = s.prepare(
-		  'SELECT SUM(MoneyWon) AS total FROM TournamentResult WHERE PlayerId=?'
-		).get(tmPlayerId)?.total ?? 0;
+		// Détection dynamique du nom de la colonne gains (MoneyWon vs PrizeMoney vs Money selon version TM)
+		const trCols = s.prepare('PRAGMA table_info(TournamentResult)').all().map(c => c.name);
+		const moneyCol = trCols.find(c => /money/i.test(c)) ?? null;
+		const totalMoney = moneyCol
+		  ? (s.prepare(`SELECT SUM(${moneyCol}) AS total FROM TournamentResult WHERE PlayerId=?`).get(tmPlayerId)?.total ?? 0)
+		  : 0;
+		console.log(`[TmData] Colonnes TournamentResult contenant 'money': ${trCols.filter(c => /money/i.test(c)).join(', ')} — col utilisée: ${moneyCol} — total: ${totalMoney}`);
 
 		// Injuries actives
 		const injuries = s.prepare(
@@ -922,21 +919,24 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	function getJuniorCategoryIds(s) {
 	  const ids = new Set();
 	  try {
-		const rows = s.prepare(`
-		  SELECT DISTINCT t.CategoryId FROM Tournament t
-		  WHERE lower(t.Name) LIKE '%junior%'
-		     OR t.Name LIKE 'J %' OR t.Name LIKE 'J-%'
-		     OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*'
-		`).all();
-		for (const r of rows) if (r.CategoryId != null) ids.add(r.CategoryId);
-
-		// Ajouter aussi les CategoryId dont le Type >= 10 (juniors TM2026)
+		// Méthode principale : TournamentCategory.Circuit=1 (junior) dans TM2026
 		try {
-		  const catRows = s.prepare(`
-			SELECT DISTINCT Id FROM TournamentCategory WHERE Type >= 10
+		  const catCols = s.prepare('PRAGMA table_info(TournamentCategory)').all().map(c => c.name);
+		  if (catCols.includes('Circuit')) {
+			const rows = s.prepare('SELECT DISTINCT Id FROM TournamentCategory WHERE Circuit=1').all();
+			for (const r of rows) if (r.Id != null) ids.add(r.Id);
+		  }
+		} catch (_) {}
+		// Fallback : nom du tournoi contenant "junior"
+		if (ids.size === 0) {
+		  const rows = s.prepare(`
+			SELECT DISTINCT t.CategoryId FROM Tournament t
+			WHERE lower(t.Name) LIKE '%junior%'
+			   OR t.Name LIKE 'J %' OR t.Name LIKE 'J-%'
+			   OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*'
 		  `).all();
-		  for (const r of catRows) if (r.Id != null) ids.add(r.Id);
-		} catch (_) { /* TournamentCategory peut ne pas avoir de colonne Type */ }
+		  for (const r of rows) if (r.CategoryId != null) ids.add(r.CategoryId);
+		}
 	  } catch (e) { console.error('[JuniorCat] Erreur:', e.message); }
 	  return ids;
 	}
@@ -1138,7 +1138,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	}
 
 	function pct(a, b)  { return b > 0 ? `${Math.round((a ?? 0) / b * 100)}%` : '—'; }
-	function moneyFmt(n){ return n > 0 ? `$${Number(n).toLocaleString('fr-FR')}` : '$0'; }
+	function moneyFmt(n){ return n > 0 ? `$${Number(n).toLocaleString('fr-FR')}` : '—'; }
 	function age(ts)    { return Math.floor((Date.now() / 1000 - ts) / (365.25 * 86400)); }
 
 	function ok(t, d)   { return new EmbedBuilder().setColor(COLOR.green).setTitle(`✅ ${t}`).setDescription(d).setTimestamp(); }
@@ -2237,7 +2237,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setTitle(`🛒 Shop — ${player.ingame_name}`)
 		  .setDescription(
 			`Solde : **${player.coins.toLocaleString()} 🪙** | Plafond : **18/20** | Max par stat : **+${BOOST_MAX_PER_STAT}**\n` +
-			`Utilisez `/boost <stat>` pour acheter un boost.\n` +
+			'Utilisez `/boost <stat>` pour acheter un boost.\n' +
 			`Les valeurs affichées incluent déjà vos boosts actifs.`
 		  )
 		  .setFooter({ text: 'Coût exponentiel — plus la stat est haute, plus c\'est cher' });
