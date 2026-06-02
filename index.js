@@ -363,7 +363,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	const HAND_LABEL    = { 1: 'Droitier', 2: 'Gaucher' };
 	const BH_LABEL      = { 1: 'Revers 1 main', 2: 'Revers 2 mains' };
 	const SURFACE_LABEL = { 1: '🔶 Terre battue', 2: '🟩 Gazon', 3: '🔷 Dur', 4: '🏟️ Dur indoor' };
-	const ROUND_LABEL   = { '-1': '🏆 Vainqueur', '0': '🥈 Finaliste', '1': 'Demi-finale', '2': 'Quart de finale', '3': '8ème de finale', '4': '16ème de finale', '5': '32ème de finale', '6': '64ème de finale' };
+	const ROUND_LABEL   = { '-1': '🏆 Vainqueur', '0': '🥈 Finaliste', '1': '🥉 Demi-finale', '2': 'Quart de finale', '3': '8ème de finale', '4': '16ème de finale', '5': '32ème de finale', '6': '64ème de finale', '7': 'Qualif.', '8': 'Qualif.', '9': 'Qualif.' };
 
 	// Attributs TM2026 → label affiché (groupés par catégorie)
 	const ATTR_GROUPS = {
@@ -455,30 +455,51 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  return { clause: `(t.CategoryId IN (${ph}) OR ${nameFilter})`, ids };
 		})();
 
-		// Stats Junior (Circuit=1)
-		const statsJunior = s.prepare(`
-		  SELECT
-			SUM(MatchPlayed) AS played, SUM(MatchWon) AS won,
-			(SELECT COUNT(*) FROM TournamentResult tr2
-			 JOIN Tournament t2 ON t2.Id = tr2.TournamentId
-			 WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
-			   AND ${jIncl.replace(/\bt\b/g, 't2')}
-			   AND t2.Name IS NOT NULL AND trim(t2.Name) != ''
-			   AND lower(t2.Name) NOT LIKE '%estimated%'
-			   AND lower(t2.Name) NOT LIKE '%unknown%'
-			) AS titles,
-			(SELECT COUNT(*) FROM TournamentResult tr3
-			 JOIN Tournament t3 ON t3.Id = tr3.TournamentId
-			 WHERE tr3.PlayerId=? AND tr3.RoundReached=0
-			   AND ${jIncl.replace(/\bt\b/g, 't3')}
-			   AND t3.Name IS NOT NULL AND trim(t3.Name) != ''
-			   AND lower(t3.Name) NOT LIKE '%estimated%'
-			   AND lower(t3.Name) NOT LIKE '%unknown%'
-			) AS finals
-		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
-		`).get(...(jIdsIncl.length
-		  ? [tmPlayerId, ...jIdsIncl, tmPlayerId, ...jIdsIncl, tmPlayerId]
-		  : [tmPlayerId, tmPlayerId, tmPlayerId])) ?? {};
+		// Stats Junior — titres/finales depuis TournamentResult, bilan V/D depuis Match
+		// (TennisPlayerStatistics Circuit=1 est souvent vide dans TM2026)
+		const statsJuniorTitles = s.prepare(`
+		  SELECT COUNT(*) AS cnt FROM TournamentResult tr2
+		  JOIN Tournament t2 ON t2.Id = tr2.TournamentId
+		  WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
+		    AND ${jIncl.replace(/\bt\b/g, 't2')}
+		    AND t2.Name IS NOT NULL AND trim(t2.Name) != ''
+		    AND lower(t2.Name) NOT LIKE '%estimated%'
+		    AND lower(t2.Name) NOT LIKE '%unknown%'
+		`).get(...[tmPlayerId, ...jIdsIncl])?.cnt ?? 0;
+
+		const statsJuniorFinals = s.prepare(`
+		  SELECT COUNT(*) AS cnt FROM TournamentResult tr3
+		  JOIN Tournament t3 ON t3.Id = tr3.TournamentId
+		  WHERE tr3.PlayerId=? AND tr3.RoundReached=0
+		    AND ${jIncl.replace(/\bt\b/g, 't3')}
+		    AND t3.Name IS NOT NULL AND trim(t3.Name) != ''
+		    AND lower(t3.Name) NOT LIKE '%estimated%'
+		    AND lower(t3.Name) NOT LIKE '%unknown%'
+		`).get(...[tmPlayerId, ...jIdsIncl])?.cnt ?? 0;
+
+		// Bilan V/D junior via table Match (fiable même si TennisPlayerStatistics est vide)
+		const statsJuniorBilan = (() => {
+		  if (juniorCatIds.size === 0) return { played: 0, won: 0 };
+		  const jph = [...juniorCatIds].map(() => '?').join(',');
+		  const row = s.prepare(`
+		    SELECT
+		      COUNT(*) AS played,
+		      SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS won
+		    FROM Match m
+		    JOIN Tournament t ON t.Id = m.TournamentId
+		    WHERE (m.Player1Id=? OR m.Player2Id=?)
+		      AND m.Outcome IN (2,3)
+		      AND t.CategoryId IN (${jph})
+		  `).get(tmPlayerId, tmPlayerId, tmPlayerId, tmPlayerId, ...[...juniorCatIds]);
+		  return { played: row?.played ?? 0, won: row?.won ?? 0 };
+		})();
+
+		const statsJunior = {
+		  titles: statsJuniorTitles,
+		  finals: statsJuniorFinals,
+		  played: statsJuniorBilan.played,
+		  won:    statsJuniorBilan.won,
+		};
 
 		const stats = s.prepare(`
 		  SELECT
@@ -1288,7 +1309,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		embed.addFields(
 		  { name: '🎓 Titres Junior',  value: `**${statsJunior.titles ?? 0}**`,  inline: true },
 		  { name: '🥈 Finales Junior', value: `**${statsJunior.finals ?? 0}**`,  inline: true },
-		  { name: '📊 Bilan Junior',   value: statsJunior.played ? `**${statsJunior.won}V** / ${statsJunior.played - statsJunior.won}D (${pct(statsJunior.won, statsJunior.played)})` : '—', inline: true },
+		  { name: '📊 Bilan Junior',   value: (statsJunior.played ?? 0) > 0 ? `**${statsJunior.won ?? 0}V** / ${(statsJunior.played ?? 0) - (statsJunior.won ?? 0)}D (${pct(statsJunior.won ?? 0, statsJunior.played ?? 0)})` : (statsJunior.titles > 0 || statsJunior.finals > 0 ? '— (stats non dispo)' : '—'), inline: true },
 		);
 	  }
 
@@ -1345,7 +1366,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
 		  return `${TOURN_CAT_SHORT[cat] ? `[${TOURN_CAT_SHORT[cat]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
 		}).join('\n');
-		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
+		embed.addFields({ name: `─────── 🏅 Meilleurs résultats ${lastResults[0]?.Year ? `(saison ${lastResults[0].Year})` : ''} ───────`, value: lines });
 	  }
 
 	  if (injuries.length) {
