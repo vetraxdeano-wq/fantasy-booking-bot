@@ -446,7 +446,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const statsJunior = s.prepare(`
 		  SELECT
 			SUM(MatchPlayed) AS played, SUM(MatchWon) AS won,
-			(SELECT COUNT(*) FROM TournamentResult WHERE PlayerId=? AND RoundReached=-1) AS titles
+			(SELECT COUNT(*) FROM TournamentResult tr2
+			 JOIN Tournament t2 ON t2.Id = tr2.TournamentId
+			 LEFT JOIN TournamentCategory tc2 ON tc2.Id = t2.CategoryId
+			 WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
+			   AND (lower(t2.Name) LIKE '%junior%' OR lower(tc2.Name) LIKE '%junior%')
+			) AS titles
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
 		`).get(tmPlayerId, tmPlayerId) ?? {};
 
@@ -473,13 +478,23 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  GROUP BY Surface ORDER BY Surface
 		`).all(tmPlayerId);
 
-		const titles = s.prepare(
-		  'SELECT COUNT(*) AS cnt FROM TournamentResult WHERE PlayerId=? AND RoundReached=-1'
-		).get(tmPlayerId)?.cnt ?? 0;
+		const titles = s.prepare(`
+		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
+		    AND (tc.Type IS NULL OR tc.Type NOT IN (SELECT tc2.Type FROM TournamentCategory tc2 WHERE lower(tc2.Name) LIKE '%junior%') )
+		    AND lower(t.Name) NOT LIKE '%junior%'
+		`).get(tmPlayerId)?.cnt ?? 0;
 
-		const finals = s.prepare(
-		  'SELECT COUNT(*) AS cnt FROM TournamentResult WHERE PlayerId=? AND RoundReached=0'
-		).get(tmPlayerId)?.cnt ?? 0;
+		const finals = s.prepare(`
+		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=0
+		    AND (tc.Type IS NULL OR tc.Type NOT IN (SELECT tc2.Type FROM TournamentCategory tc2 WHERE lower(tc2.Name) LIKE '%junior%') )
+		    AND lower(t.Name) NOT LIKE '%junior%'
+		`).get(tmPlayerId)?.cnt ?? 0;
 
 		// Sous-requête adversaire via table Match (Player1Id/Player2Id + Outcome)
 		const lastResultsQuery = `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
@@ -2279,8 +2294,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
 	  try {
 		// Récupérer TOUS les Ids de tournois correspondant au nom
+		// Vérifier si TournamentCategory a une colonne Name avant de l'utiliser
+		const tcCols = s.prepare('PRAGMA table_info(TournamentCategory)').all().map(c => c.name);
+		const hasTcName = tcCols.includes('Name');
+		const catNameSel = hasTcName ? 'tc.Name AS CatName' : 'NULL AS CatName';
 		const tournois = s.prepare(`
-		  SELECT t.Id, t.Name, t.CategoryId, tc.Name AS CatName
+		  SELECT t.Id, t.Name, t.CategoryId, ${catNameSel}
 		  FROM Tournament t
 		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
 		  WHERE t.Name LIKE ? COLLATE NOCASE
