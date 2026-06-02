@@ -433,6 +433,23 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		).get(tmPlayerId) ?? {};
 		const bestRank = bestRankRow.BestRank != null ? bestRankRow.BestRank + 1 : null;
 
+		// Rang Junior (Circuit=1)
+		const rankJunior = s.prepare(
+		  'SELECT Rank, Points FROM Ranking WHERE PlayerId=? AND Circuit=1 ORDER BY Date DESC LIMIT 1'
+		).get(tmPlayerId) ?? null;
+		const bestRankJuniorRow = rankJunior ? s.prepare(
+		  'SELECT MIN(Rank) AS BestRank FROM Ranking WHERE PlayerId=? AND Circuit=1'
+		).get(tmPlayerId) : null;
+		const bestRankJunior = bestRankJuniorRow?.BestRank != null ? bestRankJuniorRow.BestRank + 1 : null;
+
+		// Stats Junior (Circuit=1)
+		const statsJunior = s.prepare(`
+		  SELECT
+			SUM(MatchPlayed) AS played, SUM(MatchWon) AS won,
+			SUM(TournamentWon) AS titles
+		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
+		`).get(tmPlayerId) ?? {};
+
 		const stats = s.prepare(`
 		  SELECT
 			SUM(MatchPlayed)              AS played,
@@ -495,7 +512,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  'SELECT Zone, Type FROM Injury WHERE PlayerId=? AND IsActive=1'
 		).all(tmPlayerId);
 
-		return { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries };
+		return { p, rank, race, bestRank, rankJunior, bestRankJunior, statsJunior, stats, surfStats, titles, finals, lastResults, totalMoney, injuries };
 	  } catch (e) {
 		console.error('Erreur lecture save.db:', e.message);
 		return null;
@@ -988,7 +1005,12 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		return embed;
 	  }
 
-	  const { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tmData;
+	  const { p, rank, race, bestRank, rankJunior, bestRankJunior, injuries } = tmData;
+
+	  // Circuit
+	  const hasJunior = rankJunior && (rankJunior.Rank != null);
+	  const hasATP    = rank && (rank.Rank != null);
+	  const circuitLabel = hasJunior && !hasATP ? '🎓 Junior' : hasJunior ? '🎓 Junior → 🏆 ATP' : '🏆 ATP';
 
 	  // ── Identité TM ─────────────────────────────────────────────────────────────
 	  embed.addFields(
@@ -998,10 +1020,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '🎂 Âge',         value: `${age(p.DateOfBirth)} ans`,             inline: true },
 		{ name: '🖐️ Main',        value: HAND_LABEL[p.Handedness] ?? '—',        inline: true },
 		{ name: '🎯 Revers',      value: BH_LABEL[p.BackhandStyle] ?? '—',        inline: true },
+		{ name: '📡 Circuit',     value: circuitLabel,                             inline: true },
 		{ name: '💪 Condition',   value: `${p.PhysicalCondition ?? '—'}/100`,     inline: true },
 		{ name: '❤️ Moral',      value: `${p.Morale ?? '—'}/100`,                inline: true },
 		{ name: '🌟 Notoriété',   value: `${(p.Fame ?? 0).toFixed(1)}/20`,        inline: true },
-		{ name: '\u200B',         value: '\u200B',                                 inline: true },
 	  );
 
 	  if (injuries?.length) {
@@ -1010,7 +1032,6 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  // ── Attributs détaillés par groupe ─────────────────────────────────────────
 	  if (p) {
-		const boosts = {}; // pas de boosts dans le contexte profil simple
 		for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
 		  const lines = attrs.map(([key, label]) => {
 			const val = p[key] ?? 0;
@@ -1028,24 +1049,6 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		{ name: '🔷 Dur',          value: surfBar(p.HardSurfaceMastering),       inline: true },
 		{ name: '🏟️ Dur indoor',  value: surfBar(p.HardIndoorSurfaceMastering),  inline: true },
 	  );
-
-	  // ── Bilan par surface ─────────────────────────────────────────────────────
-	  if (surfStats.length) {
-		const lines = surfStats.map(s =>
-		  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
-		).join('\n');
-		embed.addFields({ name: '─────── 🌍 Bilan par surface ───────', value: lines });
-	  }
-
-	  // ── Derniers résultats ───────────────────────────────────────────────────────
-	  if (lastResults.length) {
-		const lines = lastResults.map(r => {
-		  const cat = normalizeTournCat(r.Category, r.Name);
-		  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
-		  return `${TOURN_CAT_SHORT[cat] ? `[${TOURN_CAT_SHORT[cat]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
-		}).join('\n');
-		embed.addFields({ name: '─────── 📋 Derniers résultats ───────', value: lines });
-	  }
 
 	  return embed;
 	}
@@ -1096,25 +1099,54 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	}
 
 	function buildPublicStatsEmbed(tm, forme, rivalites) {
-	  const { p, rank, race, bestRank, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tm;
+	  const { p, rank, race, bestRank, rankJunior, bestRankJunior, statsJunior, stats, surfStats, titles, finals, lastResults, totalMoney, injuries } = tm;
 	  const name = `${p.Firstname} ${p.Lastname}`;
+
+	  // Détecter le circuit principal : Junior si rang Junior présent et rang ATP absent/faible
+	  const hasJunior = rankJunior && (rankJunior.Rank != null);
+	  const hasATP    = rank && (rank.Rank != null);
+	  const circuitLabel = hasJunior && !hasATP ? '🎓 Junior' : hasJunior ? '🎓 Junior → 🏆 ATP' : '🏆 ATP';
+
+	  // Ligne de classement ATP
+	  const rankATPStr = hasATP
+		? `🏆 ATP **#${rank.Rank + 1}** (${(rank.Points ?? 0).toLocaleString()} pts)` +
+		  (bestRank != null ? ` | Meilleur : **#${bestRank}**` : '') +
+		  (race.RaceRank != null ? ` | Race : **#${race.RaceRank + 1}**` : '')
+		: null;
+
+	  // Ligne de classement Junior
+	  const rankJuniorStr = hasJunior
+		? `🎓 Junior **#${rankJunior.Rank + 1}** (${(rankJunior.Points ?? 0).toLocaleString()} pts)` +
+		  (bestRankJunior != null ? ` | Meilleur : **#${bestRankJunior}**` : '')
+		: null;
+
+	  const classementLines = [rankATPStr, rankJuniorStr].filter(Boolean).join('\n');
+
 	  const embed = new EmbedBuilder()
 		.setColor(COLOR.tennis)
 		.setTitle(`📊 Stats — ${name} (${p.Country ?? '??'})`)
 		.setDescription(
-		  `${HAND_LABEL[p.Handedness] ?? ''} — ${BH_LABEL[p.BackhandStyle] ?? ''} | Âge : **${age(p.DateOfBirth)}** ans\n` +
-		  `Classement actuel : **#${rank.Rank != null ? rank.Rank + 1 : '?'}** (${(rank.Points ?? 0).toLocaleString()} pts)` +
-		  (bestRank != null ? ` | Meilleur : **#${bestRank}**` : '') +
-		  ` | Race : **#${race.RaceRank != null ? race.RaceRank + 1 : '?'}**`
+		  `${HAND_LABEL[p.Handedness] ?? ''} — ${BH_LABEL[p.BackhandStyle] ?? ''} | Âge : **${age(p.DateOfBirth)}** ans | ${circuitLabel}\n` +
+		  (classementLines || '_Aucun classement_')
 		)
 		.setFooter({ text: 'Tennis Manager 2026 — Stats' })
 		.setTimestamp();
 
+	  // Bilan ATP
 	  embed.addFields(
-		{ name: '🏆 Titres', value: `**${titles}**`, inline: true },
-		{ name: '🥈 Finales', value: `**${finals}**`, inline: true },
-		{ name: '📊 Bilan', value: stats.played ? `**${stats.won}V** / ${stats.played - stats.won}D (${pct(stats.won, stats.played)})` : '—', inline: true },
+		{ name: '🏆 Titres ATP', value: `**${titles}**`, inline: true },
+		{ name: '🥈 Finales ATP', value: `**${finals}**`, inline: true },
+		{ name: '📊 Bilan ATP', value: stats.played ? `**${stats.won}V** / ${stats.played - stats.won}D (${pct(stats.won, stats.played)})` : '—', inline: true },
 	  );
+
+	  // Bilan Junior si dispo
+	  if (hasJunior && (statsJunior.played > 0 || statsJunior.titles > 0)) {
+		embed.addFields(
+		  { name: '🎓 Titres Junior', value: `**${statsJunior.titles ?? 0}**`, inline: true },
+		  { name: '📊 Bilan Junior', value: statsJunior.played ? `**${statsJunior.won}V** / ${statsJunior.played - statsJunior.won}D (${pct(statsJunior.won, statsJunior.played)})` : '—', inline: true },
+		  { name: '\u200B', value: '\u200B', inline: true },
+		);
+	  }
 
 	  // ── Forme récente ────────────────────────────────────────────────────────────
 	  if (forme) {
@@ -1697,43 +1729,17 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  }
 		  const tm = getTmPlayerData(results[0].Id);
 		  if (!tm) return interaction.editReply({ embeds: [err('Impossible de lire les stats de ce joueur.')] });
-		  // Embed sans profil Discord
-		  const p = tm.p;
-		  const embedTm = new EmbedBuilder()
-			.setColor(COLOR.tennis)
-			.setTitle(`🎾 ${p.Firstname} ${p.Lastname} (${p.Country ?? '—'})`)
-			.setDescription(`${HAND_LABEL[p.Handedness] ?? '—'} — ${BH_LABEL[p.BackhandStyle] ?? '—'} | Âge : **${age(p.DateOfBirth)} ans**`)
-			.setFooter({ text: 'Tennis Manager 2026 — Profil TM' })
-			.setTimestamp();
-		  embedTm.addFields(
-			{ name: '💪 Condition',  value: `${p.PhysicalCondition ?? '—'}/100`,                 inline: true },
-			{ name: '❤️ Moral',      value: `${p.Morale ?? '—'}/100`,                            inline: true },
-			{ name: '🌟 Notoriété',  value: `${(p.Fame ?? 0).toFixed(1)}/20`,                    inline: true },
-		  );
-		  // Attributs détaillés
-		  for (const [groupName, attrs] of Object.entries(ATTR_GROUPS)) {
-			const lines = attrs.map(([key, label]) => {
-			  const val = p[key] ?? 0;
-			  return `\`${label.padEnd(20)}\` ${attrBar(val)}`;
-			}).join('\n');
-			embedTm.addFields({ name: groupName, value: lines, inline: false });
-		  }
-		  if (tm.surfStats.length) {
-			const lines = tm.surfStats.map(s =>
-			  `${SURFACE_LABEL[s.Surface] ?? `Surface ${s.Surface}`} : **${s.w}V/${s.p - s.w}D** (${pct(s.w, s.p)})`
-			).join('\n');
-			embedTm.addFields({ name: '🌍 Bilan par surface', value: lines });
-		  }
-		  if (tm.lastResults.length) {
-			const lines = tm.lastResults.map(r => {
-			  const opponent = r.OpponentName ? ` vs **${r.OpponentName}**` : '';
-			  return `${TOURN_CAT_SHORT[r.Category] ? `[${TOURN_CAT_SHORT[r.Category]}] ` : ''}${ROUND_LABEL[String(r.RoundReached)] ?? `R${r.RoundReached}`} — **${r.Name}** (${r.Year})${opponent}`;
-			}).join('\n');
-			embedTm.addFields({ name: '📋 Derniers résultats', value: lines });
-		  }
-		  const tmName1 = `${p.Firstname} ${p.Lastname}`;
+		  // Faux profil Discord minimal pour réutiliser buildProfileEmbed
+		  const fakePlayer = {
+			ingame_name: `${tm.p.Firstname} ${tm.p.Lastname}`,
+			nationality: tm.p.Country ?? '—',
+			playstyle: null,
+			coins: 0,
+			tm_player_id: results[0].Id,
+		  };
+		  const tmName1 = `${tm.p.Firstname} ${tm.p.Lastname}`;
 		  const navRow1 = buildProfilNavButtons(tmName1);
-		  return interaction.editReply({ embeds: [embedTm], components: navRow1 });
+		  return interaction.editReply({ embeds: [buildProfileEmbed(fakePlayer, tm, null)], components: navRow1 });
 		}
 
 		// Mode Discord : joueur mentionné ou soi-même
@@ -1763,27 +1769,37 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  return interaction.editReply({ embeds: [buildProfileEmbed(player, null, profilPhoto)] });
 		}
 
-		// Profil Discord complet : mêmes infos que /profil <nom> + stats complètes
+		// Profil Discord complet : identité + classement, pas de stats détaillées (→ /stats)
 		const pFull = tmFull.p;
 		const profilPhoto = player.character_photo ?? target.displayAvatarURL({ dynamic: true });
 
 		const forme2     = getTmForme(player.tm_player_id);
 		const rivalites2 = getTmRivalites(player.tm_player_id);
 
-		// Réutilise buildPublicStatsEmbed (rang, race, bilan, forme, stats match, rivalités, derniers résultats)
-		const embedDiscord = buildPublicStatsEmbed(tmFull, forme2, rivalites2);
+		// Circuit du joueur
+		const hasJuniorP = tmFull.rankJunior && (tmFull.rankJunior.Rank != null);
+		const hasATPP    = tmFull.rank && (tmFull.rank.Rank != null);
+		const circuitP   = hasJuniorP && !hasATPP ? '🎓 Junior' : hasJuniorP ? '🎓 Junior → 🏆 ATP' : '🏆 ATP';
 
-		// Surcharge le titre et la description pour y ajouter les infos Discord
+		const rankATPLineP = hasATPP
+		  ? `🏆 ATP **#${tmFull.rank.Rank + 1}** (${(tmFull.rank.Points ?? 0).toLocaleString()} pts)` +
+			(tmFull.bestRank != null ? ` | Meilleur : **#${tmFull.bestRank}**` : '') +
+			(tmFull.race.RaceRank != null ? ` | Race : **#${tmFull.race.RaceRank + 1}**` : '')
+		  : null;
+		const rankJuniorLineP = hasJuniorP
+		  ? `🎓 Junior **#${tmFull.rankJunior.Rank + 1}** (${(tmFull.rankJunior.Points ?? 0).toLocaleString()} pts)` +
+			(tmFull.bestRankJunior != null ? ` | Meilleur : **#${tmFull.bestRankJunior}**` : '')
+		  : null;
+		const classementP = [rankATPLineP, rankJuniorLineP].filter(Boolean).join('\n') || '_Aucun classement_';
+
+		const embedDiscord = buildProfileEmbed(player, tmFull, profilPhoto);
+		// Surcharge titre et description pour les infos Discord
 		embedDiscord.setTitle(`🎾 ${pFull.Firstname} ${pFull.Lastname} (${pFull.Country ?? '—'})`);
-		const rankDesc = tmFull.rank.Rank != null ? `#${tmFull.rank.Rank + 1}` : '?';
-		const raceDesc = tmFull.race.RaceRank != null ? `#${tmFull.race.RaceRank + 1}` : '?';
-		const bestDesc = tmFull.bestRank != null ? ` | Meilleur : **#${tmFull.bestRank}**` : '';
 		embedDiscord.setDescription(
-		  `${HAND_LABEL[pFull.Handedness] ?? '—'} — ${BH_LABEL[pFull.BackhandStyle] ?? '—'} | Âge : **${age(pFull.DateOfBirth)} ans**\n` +
+		  `${HAND_LABEL[pFull.Handedness] ?? '—'} — ${BH_LABEL[pFull.BackhandStyle] ?? '—'} | Âge : **${age(pFull.DateOfBirth)} ans** | ${circuitP}\n` +
 		  `🎮 **${player.ingame_name}** | 💰 **${player.coins.toLocaleString()} 🪙**\n` +
-		  `Classement actuel : **${rankDesc}** (${(tmFull.rank.Points ?? 0).toLocaleString()} pts)${bestDesc} | Race : **${raceDesc}**`
+		  classementP
 		);
-		embedDiscord.setThumbnail(profilPhoto);
 		embedDiscord.setFooter({ text: 'Tennis Manager 2026 — Profil TM' });
 
 		const tmName2 = `${pFull.Firstname} ${pFull.Lastname}`;
@@ -2262,27 +2278,32 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const s = openSaveDb();
 	  if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
 	  try {
-		const tourn = s.prepare(`
+		// Récupérer TOUS les Ids de tournois correspondant au nom (chaque édition annuelle a son propre Id dans TM2026)
+		const tournois = s.prepare(`
 		  SELECT Id, Name, CategoryId FROM Tournament
 		  WHERE Name LIKE ? COLLATE NOCASE
-		  ORDER BY CategoryId ASC LIMIT 1
-		`).get(`%${nomTournoi}%`);
+		  ORDER BY CategoryId ASC
+		`).all(`%${nomTournoi}%`);
 
-		if (!tourn)
+		if (!tournois.length)
 		  return interaction.editReply({ embeds: [err(`Tournoi introuvable : **${nomTournoi}**\nEssaie un nom plus précis (ex: \`Roland Garros\`, \`Wimbledon\`, \`US Open\`...)`)] });
+
+		const tourn = tournois[0]; // référence pour nom/catégorie
+		const tournIds = tournois.map(t => t.Id);
+		const ph = tournIds.map(() => '?').join(','); // placeholders IN (?,?,...)
 
 		const { label: catLabel, isJunior: catIsJunior } = resolveCatLabel(s, tourn.CategoryId);
 		const isJunior = catIsJunior || isJuniorTournament(tourn.Name);
 		const catEmoji  = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
 		const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
 
-		// Toutes les participations triées par année
+		// Toutes les participations triées par année — sur TOUS les TournamentIds
 		const participations = s.prepare(`
-		  SELECT tr.Year, tr.RoundReached, tr.MoneyWon, tr.PointsMain, tr.EntryRank
+		  SELECT tr.TournamentId, tr.Year, tr.RoundReached, tr.MoneyWon, tr.PointsMain, tr.EntryRank
 		  FROM TournamentResult tr
-		  WHERE tr.TournamentId = ? AND tr.PlayerId = ?
+		  WHERE tr.TournamentId IN (${ph}) AND tr.PlayerId = ?
 		  ORDER BY tr.Year ASC
-		`).all(tourn.Id, tmId);
+		`).all(...tournIds, tmId);
 
 		if (!participations.length) {
 		  return interaction.editReply({ embeds: [
@@ -2302,14 +2323,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const totalMoney = participations.reduce((acc, p) => acc + (p.MoneyWon ?? 0), 0);
 		const totalPts   = participations.reduce((acc, p) => acc + (p.PointsMain ?? 0), 0);
 
-		// Bilan V/D total dans ce tournoi (toutes années)
+		// Bilan V/D total dans ce tournoi (toutes années, tous Ids)
 		const matchStats = s.prepare(`
 		  SELECT
 			SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS wins,
 			SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=3) OR (m.Player2Id=? AND m.Outcome=2) THEN 1 ELSE 0 END) AS losses
 		  FROM Match m
-		  WHERE m.TournamentId = ? AND (m.Player1Id=? OR m.Player2Id=?) AND m.Outcome IN (2,3)
-		`).get(tmId, tmId, tmId, tmId, tourn.Id, tmId, tmId);
+		  WHERE m.TournamentId IN (${ph}) AND (m.Player1Id=? OR m.Player2Id=?) AND m.Outcome IN (2,3)
+		`).get(tmId, tmId, tmId, tmId, ...tournIds, tmId, tmId);
 
 		const wins   = matchStats?.wins ?? 0;
 		const losses = matchStats?.losses ?? 0;
@@ -2346,16 +2367,15 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		if (yearLines)
 		  embed.addFields({ name: '📋 Historique par édition', value: yearLines.length <= 1024 ? yearLines : yearLines.slice(0, 1021) + '…' });
 
-		// Boutons d'années — on encode aussi le tmId pour que le bouton sache quel joueur afficher
-		const years = participations.map(p => p.Year);
+		// Boutons d'années — on encode le TournamentId exact de chaque édition pour que le handler récupère les bons matchs
 		const components = [];
-		for (let i = 0; i < Math.min(years.length, 25); i += 5) {
+		for (let i = 0; i < Math.min(participations.length, 25); i += 5) {
 		  const row = new ActionRowBuilder();
-		  for (const yr of years.slice(i, i + 5)) {
+		  for (const p of participations.slice(i, i + 5)) {
 			row.addComponents(
 			  new ButtonBuilder()
-				.setCustomId(`tournoi_year:${tourn.Id}:${yr}:${tmId}`)
-				.setLabel(String(yr))
+				.setCustomId(`tournoi_year:${p.TournamentId}:${p.Year}:${tmId}`)
+				.setLabel(String(p.Year))
 				.setStyle(ButtonStyle.Secondary)
 			);
 		  }
@@ -2417,7 +2437,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		FROM Match m
 		LEFT JOIN TennisPlayer p1 ON m.Player1Id = p1.Id
 		LEFT JOIN TennisPlayer p2 ON m.Player2Id = p2.Id
-		WHERE m.TournamentId = ? AND m.Year = ?
+		WHERE m.TournamentId = ? AND CAST(strftime('%Y', m.Date, 'unixepoch') AS INTEGER) = ?
 		  AND (m.Player1Id = ? OR m.Player2Id = ?)
 		  AND m.Outcome IN (2, 3)
 		ORDER BY m.Round DESC
@@ -3820,7 +3840,7 @@ function buildProfilNavButtons(tmName) {
 		FROM Match m
 		LEFT JOIN TennisPlayer p1 ON m.Player1Id = p1.Id
 		LEFT JOIN TennisPlayer p2 ON m.Player2Id = p2.Id
-		WHERE m.TournamentId = ? AND m.Year = ?
+		WHERE m.TournamentId = ? AND CAST(strftime('%Y', m.Date, 'unixepoch') AS INTEGER) = ?
 		  AND (m.Player1Id = ? OR m.Player2Id = ?)
 		  AND m.Outcome IN (2, 3)
 		ORDER BY m.Round DESC
