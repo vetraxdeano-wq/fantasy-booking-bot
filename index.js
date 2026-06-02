@@ -442,15 +442,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		).get(tmPlayerId) : null;
 		const bestRankJunior = bestRankJuniorRow?.BestRank != null ? bestRankJuniorRow.BestRank + 1 : null;
 
-		// Stats Junior (Circuit=1)
+		// Stats Junior (Circuit=1) — détection junior uniquement sur t.Name (tc.Name inexistant)
 		const statsJunior = s.prepare(`
 		  SELECT
 			SUM(MatchPlayed) AS played, SUM(MatchWon) AS won,
 			(SELECT COUNT(*) FROM TournamentResult tr2
 			 JOIN Tournament t2 ON t2.Id = tr2.TournamentId
-			 LEFT JOIN TournamentCategory tc2 ON tc2.Id = t2.CategoryId
 			 WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
-			   AND (lower(t2.Name) LIKE '%junior%' OR lower(tc2.Name) LIKE '%junior%')
+			   AND lower(t2.Name) LIKE '%junior%'
 			) AS titles
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
 		`).get(tmPlayerId, tmPlayerId) ?? {};
@@ -481,18 +480,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const titles = s.prepare(`
 		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
-		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
 		  WHERE tr.PlayerId=? AND tr.RoundReached=-1
-		    AND (tc.Type IS NULL OR tc.Type NOT IN (SELECT tc2.Type FROM TournamentCategory tc2 WHERE lower(tc2.Name) LIKE '%junior%') )
 		    AND lower(t.Name) NOT LIKE '%junior%'
 		`).get(tmPlayerId)?.cnt ?? 0;
 
 		const finals = s.prepare(`
 		  SELECT COUNT(*) AS cnt FROM TournamentResult tr
 		  JOIN Tournament t ON t.Id = tr.TournamentId
-		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
 		  WHERE tr.PlayerId=? AND tr.RoundReached=0
-		    AND (tc.Type IS NULL OR tc.Type NOT IN (SELECT tc2.Type FROM TournamentCategory tc2 WHERE lower(tc2.Name) LIKE '%junior%') )
 		    AND lower(t.Name) NOT LIKE '%junior%'
 		`).get(tmPlayerId)?.cnt ?? 0;
 
