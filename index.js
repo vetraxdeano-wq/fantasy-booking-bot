@@ -463,9 +463,16 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			 JOIN Tournament t2 ON t2.Id = tr2.TournamentId
 			 WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
 			   AND ${jIncl.replace(/\bt\b/g, 't2')}
-			) AS titles
+			) AS titles,
+			(SELECT COUNT(*) FROM TournamentResult tr3
+			 JOIN Tournament t3 ON t3.Id = tr3.TournamentId
+			 WHERE tr3.PlayerId=? AND tr3.RoundReached=0
+			   AND ${jIncl.replace(/\bt\b/g, 't3')}
+			) AS finals
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
-		`).get(...jIdsIncl.length ? [tmPlayerId, ...jIdsIncl, tmPlayerId] : [tmPlayerId, tmPlayerId]) ?? {};
+		`).get(...jIdsIncl.length
+		  ? [tmPlayerId, ...jIdsIncl, tmPlayerId, ...jIdsIncl, tmPlayerId]
+		  : [tmPlayerId, tmPlayerId, tmPlayerId]) ?? {};
 
 		const stats = s.prepare(`
 		  SELECT
@@ -903,6 +910,33 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  ORDER BY ${catOrd} tr.Year DESC
 		`).all(tmId, ...jIds);
 
+		// ── Juniors ──────────────────────────────────────────────────────────────
+		const { clause: jIncl2, ids: jIdsIncl2 } = (() => {
+		  const nameFilter = `(lower(t.Name) LIKE '%junior%'
+			OR t.Name LIKE 'J %' OR t.Name LIKE 'J-%'
+			OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*')`;
+		  if (juniorCatIds.size === 0) return { clause: nameFilter, ids: [] };
+		  const ids = [...juniorCatIds];
+		  const ph  = ids.map(() => '?').join(',');
+		  return { clause: `(t.CategoryId IN (${ph}) OR ${nameFilter})`, ids };
+		})();
+
+		const titlesJunior = s.prepare(`
+		  SELECT t.Name, tr.Year, tr.RoundReached
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jIncl2}
+		  ORDER BY tr.Year DESC
+		`).all(tmId, ...jIdsIncl2);
+
+		const finalsJunior = s.prepare(`
+		  SELECT t.Name, tr.Year, tr.RoundReached
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id=tr.TournamentId
+		  WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jIncl2}
+		  ORDER BY tr.Year DESC
+		`).all(tmId, ...jIdsIncl2);
+
 		const sf = s.prepare(`
 		  SELECT t.Name, ${catSel}, tr.Year, tr.RoundReached
 		  FROM TournamentResult tr
@@ -919,7 +953,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  byCategory[cat].push(r);
 		}
 
-		return { titles, finals, sf, byCategory };
+		return { titles, finals, sf, byCategory, titlesJunior, finalsJunior };
 	  } catch (e) { console.error('Palmares error:', e.message); return null; }
 	  finally { s.close(); }
 	}
@@ -1192,9 +1226,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  // Bilan Junior si dispo
 	  if (hasJunior && (statsJunior.played > 0 || statsJunior.titles > 0)) {
 		embed.addFields(
-		  { name: '🎓 Titres Junior', value: `**${statsJunior.titles ?? 0}**`, inline: true },
-		  { name: '📊 Bilan Junior', value: statsJunior.played ? `**${statsJunior.won}V** / ${statsJunior.played - statsJunior.won}D (${pct(statsJunior.won, statsJunior.played)})` : '—', inline: true },
-		  { name: '\u200B', value: '\u200B', inline: true },
+		  { name: '🎓 Titres Junior',  value: `**${statsJunior.titles ?? 0}**`,  inline: true },
+		  { name: '🥈 Finales Junior', value: `**${statsJunior.finals ?? 0}**`,  inline: true },
+		  { name: '📊 Bilan Junior',   value: statsJunior.played ? `**${statsJunior.won}V** / ${statsJunior.played - statsJunior.won}D (${pct(statsJunior.won, statsJunior.played)})` : '—', inline: true },
 		);
 	  }
 
@@ -1353,21 +1387,47 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.setFooter({ text: 'Tennis Manager 2026 — Palmarès' })
 		.setTimestamp();
 
-	  const totalTitles = palmares.titles.length;
-	  const totalFinals = palmares.finals.length;
-	  embed.setDescription(`**${totalTitles}** titre${totalTitles > 1 ? 's' : ''} — **${totalFinals}** finale${totalFinals > 1 ? 's' : ''}`);
+	  const totalATPTitles  = palmares.titles.length;
+	  const totalATPFinals  = palmares.finals.length;
+	  const totalJrTitles   = palmares.titlesJunior?.length ?? 0;
+	  const totalJrFinals   = palmares.finalsJunior?.length ?? 0;
 
-	  // Titres par catégorie
+	  const descLines = [
+		`🏆 ATP : **${totalATPTitles}** titre${totalATPTitles !== 1 ? 's' : ''} — **${totalATPFinals}** finale${totalATPFinals !== 1 ? 's' : ''}`,
+	  ];
+	  if (totalJrTitles > 0 || totalJrFinals > 0) {
+		descLines.push(`🎓 Junior : **${totalJrTitles}** titre${totalJrTitles !== 1 ? 's' : ''} — **${totalJrFinals}** finale${totalJrFinals !== 1 ? 's' : ''}`);
+	  }
+	  embed.setDescription(descLines.join('\n'));
+
+	  // Titres ATP par catégorie
 	  for (const [cat, results] of Object.entries(palmares.byCategory).sort((a, b) => a[0] - b[0])) {
 		const label = `${TOURN_CAT_EMOJI[cat] ?? '🎾'} ${TOURN_CAT[cat] ?? `Cat. ${cat}`}`;
 		const lines = results.map(r => `• **${r.Name}** (${r.Year})`).join('\n');
 		embed.addFields({ name: `${label} — ${results.length} titre${results.length > 1 ? 's' : ''}`, value: lines.slice(0, 1024) });
 	  }
 
-	  if (totalTitles === 0) {
-		embed.addFields({ name: 'Titres', value: '*Aucun titre remporté.*' });
+	  if (totalATPTitles === 0) {
+		embed.addFields({ name: '🏆 Titres ATP', value: '*Aucun titre ATP remporté.*' });
 	  }
 
+	  // Finales ATP perdues
+	  if (totalATPFinals > 0) {
+		const lines = palmares.finals.map(r => `• **${r.Name}** (${r.Year})`).join('\n');
+		embed.addFields({ name: `🥈 Finales ATP — ${totalATPFinals}`, value: lines.slice(0, 1024) });
+	  }
+
+	  // Titres juniors
+	  if (totalJrTitles > 0) {
+		const lines = palmares.titlesJunior.map(r => `• **${r.Name}** (${r.Year})`).join('\n');
+		embed.addFields({ name: `🎓 Titres Junior — ${totalJrTitles}`, value: lines.slice(0, 1024) });
+	  }
+
+	  // Finales juniors perdues
+	  if (totalJrFinals > 0) {
+		const lines = palmares.finalsJunior.map(r => `• **${r.Name}** (${r.Year})`).join('\n');
+		embed.addFields({ name: `🎓 Finales Junior — ${totalJrFinals}`, value: lines.slice(0, 1024) });
+	  }
 
 	  return embed;
 	}
