@@ -1582,21 +1582,32 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	      row:  normalize(y.endRank),
 	    }));
 
+	    // Chaque colonne = 3 chars : point centré sur char 1, puis 2 espaces
+	    // Année = 2 chars → on centre en ajoutant 1 espace devant : ' 20  21 ...'
+	    // Col data : '●  ' ou '   ' ou '│  ' → join sans séparateur
+	    // Col année : ' ' + 2chars + ' ' → join sans séparateur → chaque colonne = 4 chars
+	    // Solution : utiliser colonne de 4 chars partout : '●   ' / ' 20 '
+	    const PREFIX_W = 7; // '#XXXX  '
 	    const graphRows = [];
 	    for (let row = 0; row < HEIGHT; row++) {
-	      const line = cols.map((c, idx) => {
-	        if (c.row === row) return '●';
-	        if (idx > 0) {
-	          const prev = cols[idx - 1];
-	          if ((prev.row < row && c.row > row) || (prev.row > row && c.row < row)) return '┊';
-	        }
-	        return ' ';
-	      }).join('  ');
 	      const rankAtRow = Math.round(minRank + (row / (HEIGHT - 1)) * (maxRank - minRank));
-	      graphRows.push(`#${String(rankAtRow).padStart(4)} ${line}`);
+	      const prefix = `#${String(rankAtRow).padStart(4)}  `; // 7 chars fixes
+	      const cells = cols.map((c, idx) => {
+	        let ch;
+	        if (c.row === row) ch = '●';
+	        else if (idx > 0) {
+	          const prev = cols[idx - 1];
+	          ch = ((prev.row < row && c.row > row) || (prev.row > row && c.row < row)) ? '│' : ' ';
+	        } else ch = ' ';
+	        return ch + '   '; // chaque colonne = 4 chars (1 point + 3 espaces)
+	      });
+	      // Supprimer les espaces trailing de la dernière colonne
+	      graphRows.push((prefix + cells.join('')).trimEnd());
 	    }
-	    const yearLine = cols.map(c => String(c.year).slice(-2)).join('   ');
-	    graphRows.push(`       ${yearLine}`);
+	    // Ligne des années : chaque année occupe 4 chars (' 20 ' → 1+2+1)
+	    const yearPrefix = ' '.repeat(PREFIX_W);
+	    const yearCells = cols.map(c => String(c.year).slice(-2) + '  '); // pas d'espace devant : aligne sur le point
+	    graphRows.push((yearPrefix + yearCells.join('')).trimEnd());
 
 	    embed.addFields({
 	      name: '📈 Évolution classement (fin de saison)',
@@ -2259,8 +2270,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			const curVal  = Math.min(baseVal + used, BOOST_ABS_CAP);
 			const canBoost = used < BOOST_MAX_PER_STAT && curVal < BOOST_ABS_CAP;
 			const cost    = canBoost ? boostCost(curVal).toLocaleString() + ' 🪙' : (curVal >= BOOST_ABS_CAP ? '🔒 plafond 18' : '🔒 +2 max atteint');
-			const boostedTag = used > 0 ? ` (+\${used})` : '';
-			return `\`\${(labelOf[k] ?? k).padEnd(20)}\` \${curVal.toFixed(1)}\${boostedTag}/20 → \${cost}`;
+			const boostedTag = used > 0 ? ` (+${used})` : '';
+			return `\`${(labelOf[k] ?? k).padEnd(20)}\` ${curVal.toFixed(1)}${boostedTag}/20 → ${cost}`;
 		  }).join('\n');
 		  embed.addFields({ name: grpName, value: lines });
 		}
