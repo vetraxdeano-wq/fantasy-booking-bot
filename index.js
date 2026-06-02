@@ -476,9 +476,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 			   AND lower(t3.Name) NOT LIKE '%unknown%'
 			) AS finals
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
-		`).get(...jIdsIncl.length
+		`).get(...(jIdsIncl.length
 		  ? [tmPlayerId, ...jIdsIncl, tmPlayerId, ...jIdsIncl, tmPlayerId]
-		  : [tmPlayerId, tmPlayerId, tmPlayerId]) ?? {};
+		  : [tmPlayerId, tmPlayerId, tmPlayerId])) ?? {};
 
 		const stats = s.prepare(`
 		  SELECT
@@ -523,7 +523,19 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 		// Sous-requête adversaire via table Match (Player1Id/Player2Id + Outcome)
 		// ⚠️ On exclut les tournois juniors (même filtre que pour titles/finals)
-		const lastResultsQuery = `SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
+		// Meilleurs résultats de la dernière saison, par catégorie de tournoi (GC > M1000 > ATP500 > ATP250...)
+		// On prend la saison la plus récente avec des résultats, puis le meilleur résultat par catégorie.
+		const lastSeasonRow = s.prepare(`
+		  SELECT MAX(tr.Year) AS lastYear FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  WHERE tr.PlayerId = ? AND ${jExcl}
+		`).get(tmPlayerId, ...jIds);
+		const lastYear = lastSeasonRow?.lastYear ?? null;
+
+		// Pour chaque catégorie, prend le meilleur résultat (RoundReached le plus bas = le plus loin)
+		// RoundReached: -1=titre, 0=finale, 1=demi, 2=quart...
+		const lastResultsRaw = lastYear ? s.prepare(`
+		  SELECT t.Name, tc.Type AS Category, tr.Year, tr.RoundReached, tr.MoneyWon,
 		    (
 		      SELECT tp2.Firstname || ' ' || tp2.Lastname
 		      FROM Match m
@@ -537,12 +549,24 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		        AND m.Outcome IN (2, 3)
 		      ORDER BY m.Date DESC LIMIT 1
 		    ) AS OpponentName
-		    FROM TournamentResult tr
-		    JOIN Tournament t ON t.Id = tr.TournamentId
-		    LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-		    WHERE tr.PlayerId = ? AND ${jExcl}
-		    ORDER BY tr.Date DESC LIMIT 5`;
-		const lastResults = s.prepare(lastResultsQuery).all(tmPlayerId, ...jIds);
+		  FROM TournamentResult tr
+		  JOIN Tournament t ON t.Id = tr.TournamentId
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  WHERE tr.PlayerId = ? AND tr.Year = ? AND ${jExcl}
+		  ORDER BY tc.Type ASC, tr.RoundReached ASC
+		`).all(tmPlayerId, lastYear, ...jIds) : [];
+
+		// Dédoublonner : un seul résultat par catégorie (le meilleur = RoundReached le plus bas)
+		const seenCats = new Set();
+		const lastResults = [];
+		for (const r of lastResultsRaw) {
+		  const cat = String(r.Category ?? 'other');
+		  if (!seenCats.has(cat)) {
+		    seenCats.add(cat);
+		    lastResults.push(r);
+		    if (lastResults.length >= 5) break;
+		  }
+		}
 
 		const totalMoney = s.prepare(
 		  'SELECT SUM(MoneyWon) AS total FROM TournamentResult WHERE PlayerId=?'
@@ -2731,7 +2755,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  await interaction.deferReply({ ephemeral: true });
 		  seasonDbReady = false;
 		  try {
-			await supabaseDownload();
+			await r2Download();
 			seasonDbReady = true;
 			const info = getSaveDbInfo();
 			// Distribuer les récompenses tournois automatiquement
