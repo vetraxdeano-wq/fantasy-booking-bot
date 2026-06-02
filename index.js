@@ -446,9 +446,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const statsJunior = s.prepare(`
 		  SELECT
 			SUM(MatchPlayed) AS played, SUM(MatchWon) AS won,
-			SUM(TournamentWon) AS titles
+			(SELECT COUNT(*) FROM TournamentResult WHERE PlayerId=? AND RoundReached=-1) AS titles
 		  FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=1
-		`).get(tmPlayerId) ?? {};
+		`).get(tmPlayerId, tmPlayerId) ?? {};
 
 		const stats = s.prepare(`
 		  SELECT
@@ -2278,100 +2278,151 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const s = openSaveDb();
 	  if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
 	  try {
-		// Récupérer TOUS les Ids de tournois correspondant au nom (chaque édition annuelle a son propre Id dans TM2026)
+		// Récupérer TOUS les Ids de tournois correspondant au nom
 		const tournois = s.prepare(`
-		  SELECT Id, Name, CategoryId FROM Tournament
-		  WHERE Name LIKE ? COLLATE NOCASE
-		  ORDER BY CategoryId ASC
+		  SELECT t.Id, t.Name, t.CategoryId, tc.Name AS CatName
+		  FROM Tournament t
+		  LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+		  WHERE t.Name LIKE ? COLLATE NOCASE
+		  ORDER BY t.CategoryId ASC
 		`).all(`%${nomTournoi}%`);
 
 		if (!tournois.length)
 		  return interaction.editReply({ embeds: [err(`Tournoi introuvable : **${nomTournoi}**\nEssaie un nom plus précis (ex: \`Roland Garros\`, \`Wimbledon\`, \`US Open\`...)`)] });
 
-		const tourn = tournois[0]; // référence pour nom/catégorie
-		const tournIds = tournois.map(t => t.Id);
-		const ph = tournIds.map(() => '?').join(','); // placeholders IN (?,?,...)
+		// ── Classifier chaque tournoi : ATP vs Junior
+		const isTournJunior = (t) =>
+		  /junior|juniors/i.test(t.Name) ||
+		  /junior|juniors/i.test(t.CatName ?? '') ||
+		  (!TOURN_CAT[t.CategoryId] && /junior|juniors/i.test(t.CatName ?? ''));
 
-		const { label: catLabel, isJunior: catIsJunior } = resolveCatLabel(s, tourn.CategoryId);
-		const isJunior = catIsJunior || isJuniorTournament(tourn.Name);
-		const catEmoji  = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
-		const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
+		const atpTournois    = tournois.filter(t => !isTournJunior(t));
+		const juniorTournois = tournois.filter(t => isTournJunior(t));
 
-		// Toutes les participations triées par année — sur TOUS les TournamentIds
-		const participations = s.prepare(`
-		  SELECT tr.TournamentId, tr.Year, tr.RoundReached, tr.MoneyWon, tr.PointsMain, tr.EntryRank
-		  FROM TournamentResult tr
-		  WHERE tr.TournamentId IN (${ph}) AND tr.PlayerId = ?
-		  ORDER BY tr.Year ASC
-		`).all(...tournIds, tmId);
+		// Déterminer quel(s) circuit(s) utiliser selon les participations réelles du joueur
+		const atpIds    = atpTournois.map(t => t.Id);
+		const juniorIds = juniorTournois.map(t => t.Id);
+		const allIds    = tournois.map(t => t.Id);
 
-		if (!participations.length) {
+		const hasParticipation = (ids) => {
+		  if (!ids.length) return false;
+		  const ph2 = ids.map(() => '?').join(',');
+		  return !!s.prepare(`SELECT 1 FROM TournamentResult WHERE TournamentId IN (${ph2}) AND PlayerId=? LIMIT 1`).get(...ids, tmId);
+		};
+
+		const hasAtp    = hasParticipation(atpIds);
+		const hasJunior = hasParticipation(juniorIds);
+
+		if (!hasAtp && !hasJunior) {
+		  const refTourn = tournois[0];
 		  return interaction.editReply({ embeds: [
 			new EmbedBuilder()
 			  .setColor(COLOR.blue)
-			  .setTitle(`${catEmoji} ${tourn.Name}`)
-			  .setDescription(`**${pDisplayName}** n'a jamais participé à **${tourn.Name}**.`)
+			  .setTitle(`🎾 ${refTourn.Name}`)
+			  .setDescription(`**${pDisplayName}** n'a jamais participé à **${refTourn.Name}**.`)
 			  .setTimestamp(),
 		  ] });
 		}
 
-		// Stats globales récap
-		const titles   = participations.filter(p => p.RoundReached === -1).length;
-		const finals   = participations.filter(p => p.RoundReached === 0).length;
-		const semis    = participations.filter(p => p.RoundReached === 1).length;
-		const qf       = participations.filter(p => p.RoundReached === 2).length;
-		const totalMoney = participations.reduce((acc, p) => acc + (p.MoneyWon ?? 0), 0);
-		const totalPts   = participations.reduce((acc, p) => acc + (p.PointsMain ?? 0), 0);
+		// Si le joueur a des participations dans les deux circuits, afficher les deux sections
+		// Sinon, afficher uniquement le circuit concerné
+		const buildCircuitBlock = (ids, circuitIsJunior) => {
+		  if (!ids.length) return null;
+		  const ph2 = ids.map(() => '?').join(',');
+		  const participations = s.prepare(`
+			SELECT tr.TournamentId, tr.Year, tr.RoundReached, tr.MoneyWon, tr.PointsMain, tr.EntryRank
+			FROM TournamentResult tr
+			WHERE tr.TournamentId IN (${ph2}) AND tr.PlayerId = ?
+			ORDER BY tr.Year ASC
+		  `).all(...ids, tmId);
+		  if (!participations.length) return null;
 
-		// Bilan V/D total dans ce tournoi (toutes années, tous Ids)
-		const matchStats = s.prepare(`
-		  SELECT
-			SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS wins,
-			SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=3) OR (m.Player2Id=? AND m.Outcome=2) THEN 1 ELSE 0 END) AS losses
-		  FROM Match m
-		  WHERE m.TournamentId IN (${ph}) AND (m.Player1Id=? OR m.Player2Id=?) AND m.Outcome IN (2,3)
-		`).get(tmId, tmId, tmId, tmId, ...tournIds, tmId, tmId);
+		  const tag   = circuitIsJunior ? '🎓 Junior' : '🏆 ATP';
+		  const emoji = circuitIsJunior ? '🎓' : '🎾';
 
-		const wins   = matchStats?.wins ?? 0;
-		const losses = matchStats?.losses ?? 0;
-		const wr     = wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : '0';
+		  const titles     = participations.filter(p => p.RoundReached === -1).length;
+		  const finals     = participations.filter(p => p.RoundReached === 0).length;
+		  const semis      = participations.filter(p => p.RoundReached === 1).length;
+		  const qf         = participations.filter(p => p.RoundReached === 2).length;
+		  const totalMoney = participations.reduce((acc, p) => acc + (p.MoneyWon ?? 0), 0);
+		  const totalPts   = participations.reduce((acc, p) => acc + (p.PointsMain ?? 0), 0);
+		  const bestResult = participations.reduce((best, p) => p.RoundReached < best ? p.RoundReached : best, 99);
 
-		// Meilleur résultat (RoundReached le plus bas = le meilleur)
-		const bestResult = participations.reduce((best, p) => p.RoundReached < best ? p.RoundReached : best, 99);
+		  const matchStats = s.prepare(`
+			SELECT
+			  SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=2) OR (m.Player2Id=? AND m.Outcome=3) THEN 1 ELSE 0 END) AS wins,
+			  SUM(CASE WHEN (m.Player1Id=? AND m.Outcome=3) OR (m.Player2Id=? AND m.Outcome=2) THEN 1 ELSE 0 END) AS losses
+			FROM Match m
+			WHERE m.TournamentId IN (${ph2}) AND (m.Player1Id=? OR m.Player2Id=?) AND m.Outcome IN (2,3)
+		  `).get(tmId, tmId, tmId, tmId, ...ids, tmId, tmId);
+
+		  const wins   = matchStats?.wins ?? 0;
+		  const losses = matchStats?.losses ?? 0;
+		  const wr     = wins + losses > 0 ? ((wins / (wins + losses)) * 100).toFixed(0) : '0';
+
+		  const yearLines = participations.map(p => {
+			const rrLabel = ROUND_LABEL[String(p.RoundReached)] ?? `Tour ${p.RoundReached}`;
+			const money   = p.MoneyWon > 0 ? ` · ${p.MoneyWon.toLocaleString('fr-FR')} $` : '';
+			const pts     = p.PointsMain > 0 ? ` · ${p.PointsMain} pts` : '';
+			return `**${p.Year}** — ${rrLabel}${money}${pts}`;
+		  }).join('\n');
+
+		  // Boutons filtrés (années avec matchs dispo)
+		  const participationsWithMatches = participations.filter(p => {
+			const cnt = s.prepare(`
+			  SELECT COUNT(*) AS c FROM Match
+			  WHERE TournamentId = ? AND CAST(strftime('%Y', Date, 'unixepoch') AS INTEGER) = ?
+				AND (Player1Id = ? OR Player2Id = ?) AND Outcome IN (2, 3)
+			`).get(p.TournamentId, p.Year, tmId, tmId);
+			return (cnt?.c ?? 0) > 0;
+		  });
+
+		  return { tag, emoji, titles, finals, semis, qf, totalMoney, totalPts, bestResult, wins, losses, wr, yearLines, participations, participationsWithMatches };
+		};
+
+		const atpBlock    = hasAtp    ? buildCircuitBlock(atpIds,    false) : null;
+		const juniorBlock = hasJunior ? buildCircuitBlock(juniorIds, true)  : null;
+
+		// Choisir le bloc "principal" à afficher (ATP prioritaire, sinon Junior)
+		const mainBlock  = atpBlock ?? juniorBlock;
+		const refTourn   = (atpBlock ? atpTournois : juniorTournois)[0];
+		const isJunior   = !atpBlock;
+		const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
+		const catEmoji   = isJunior ? '🎓' : TOURN_CAT_EMOJI[refTourn?.CategoryId] ?? '🎾';
+		const { label: catLabel } = resolveCatLabel(s, refTourn?.CategoryId);
 
 		const embed = new EmbedBuilder()
-		  .setColor(titles > 0 ? COLOR.gold : COLOR.tennis)
-		  .setTitle(`${catEmoji} ${tourn.Name} — Bilan carrière`)
+		  .setColor(mainBlock.titles > 0 ? COLOR.gold : COLOR.tennis)
+		  .setTitle(`${catEmoji} ${refTourn.Name} — Bilan carrière`)
 		  .setDescription(`Statistiques de **${pDisplayName}** · ${catLabel} · **${circuitTag}**`)
 		  .addFields(
-			{ name: '📅 Éditions',           value: `**${participations.length}** participation${participations.length > 1 ? 's' : ''}`, inline: true },
-			{ name: `🏆 Titres ${circuitTag}`,  value: `**${titles}**`,  inline: true },
-			{ name: `🥈 Finales ${circuitTag}`, value: `**${finals}**`,  inline: true },
-			{ name: '🥉 Demi-finales',         value: `**${semis}**`,   inline: true },
-			{ name: '⚡ Quarts de finale',      value: `**${qf}**`,      inline: true },
-			{ name: '🎯 Meilleur résultat',     value: ROUND_LABEL[String(bestResult)] ?? `Tour ${bestResult}`, inline: true },
-			{ name: `🎾 Bilan matchs ${circuitTag}`, value: `**${wins}V / ${losses}D** (${wr}% winrate)`, inline: true },
-			{ name: '💰 Prize money total',     value: totalMoney > 0 ? totalMoney.toLocaleString('fr-FR') + ' $' : '—', inline: true },
-			{ name: isJunior ? '📊 Points Junior totaux' : '📊 Points ATP totaux', value: totalPts > 0 ? totalPts.toLocaleString() : '—', inline: true },
+			{ name: '📅 Éditions',              value: `**${mainBlock.participations.length}** participation${mainBlock.participations.length > 1 ? 's' : ''}`, inline: true },
+			{ name: `🏆 Titres ${circuitTag}`,  value: `**${mainBlock.titles}**`,  inline: true },
+			{ name: `🥈 Finales ${circuitTag}`, value: `**${mainBlock.finals}**`,  inline: true },
+			{ name: '🥉 Demi-finales',          value: `**${mainBlock.semis}**`,   inline: true },
+			{ name: '⚡ Quarts de finale',       value: `**${mainBlock.qf}**`,      inline: true },
+			{ name: '🎯 Meilleur résultat',      value: ROUND_LABEL[String(mainBlock.bestResult)] ?? `Tour ${mainBlock.bestResult}`, inline: true },
+			{ name: `🎾 Bilan matchs`,           value: `**${mainBlock.wins}V / ${mainBlock.losses}D** (${mainBlock.wr}% winrate)`, inline: true },
+			{ name: '💰 Prize money total',      value: mainBlock.totalMoney > 0 ? mainBlock.totalMoney.toLocaleString('fr-FR') + ' $' : '—', inline: true },
+			{ name: isJunior ? '📊 Points Junior totaux' : '📊 Points ATP totaux', value: mainBlock.totalPts > 0 ? mainBlock.totalPts.toLocaleString() : '—', inline: true },
 		  )
 		  .setFooter({ text: 'Tennis Manager 2026 · /tournoi — Clique sur une année pour le détail du parcours' })
 		  .setTimestamp();
 
-		// Historique par année (résumé compact)
-		const yearLines = participations.map(p => {
-		  const rrLabel = ROUND_LABEL[String(p.RoundReached)] ?? `Tour ${p.RoundReached}`;
-		  const money   = p.MoneyWon > 0 ? ` · ${p.MoneyWon.toLocaleString('fr-FR')} $` : '';
-		  const pts     = p.PointsMain > 0 ? ` · ${p.PointsMain} pts` : '';
-		  return `**${p.Year}** — ${rrLabel}${money}${pts}`;
-		}).join('\n');
-		if (yearLines)
-		  embed.addFields({ name: '📋 Historique par édition', value: yearLines.length <= 1024 ? yearLines : yearLines.slice(0, 1021) + '…' });
+		if (mainBlock.yearLines)
+		  embed.addFields({ name: '📋 Historique par édition', value: mainBlock.yearLines.length <= 1024 ? mainBlock.yearLines : mainBlock.yearLines.slice(0, 1021) + '…' });
 
-		// Boutons d'années — on encode le TournamentId exact de chaque édition pour que le handler récupère les bons matchs
+		// Si le joueur a aussi des participations dans l'autre circuit, ajouter une section info
+		if (atpBlock && juniorBlock) {
+		  const juniorYears = juniorBlock.participations.map(p => p.Year).join(', ');
+		  embed.addFields({ name: '🎓 Participations Junior également', value: `Années : **${juniorYears}** — utilise \`/tournoi ${nomTournoi} annee:[année]\` pour le détail.`, inline: false });
+		}
+
+		// Boutons des années du circuit principal
 		const components = [];
-		for (let i = 0; i < Math.min(participations.length, 25); i += 5) {
+		for (let i = 0; i < Math.min(mainBlock.participationsWithMatches.length, 25); i += 5) {
 		  const row = new ActionRowBuilder();
-		  for (const p of participations.slice(i, i + 5)) {
+		  for (const p of mainBlock.participationsWithMatches.slice(i, i + 5)) {
 			row.addComponents(
 			  new ButtonBuilder()
 				.setCustomId(`tournoi_year:${p.TournamentId}:${p.Year}:${tmId}`)
