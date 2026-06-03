@@ -1091,67 +1091,121 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  }
 	}
 
-	function buildPowerRankingEmbed(ranking) {
-	  const MEDALS      = ['🥇', '🥈', '🥉'];
-	  const RANK_EMOJIS = ['👑', '⭐', '🌟', '💫', '✨', '🎾', '🎾', '🎾', '🎾', '🎾'];
+	// ── Configs des tris disponibles ────────────────────────────────────────────
+	const PR_SORT_CONFIGS = {
+	  score:        { label: '👑 Score global',     emoji: '👑', sort: (a, b) => b.totalScore     - a.totalScore,    stat: p => `**${p.totalScore} pts**` },
+	  best_rank:    { label: '📊 Best Ranking ATP',  emoji: '📊', sort: (a, b) => (a.bestRankATP ?? 9999) - (b.bestRankATP ?? 9999), stat: p => p.bestRankATP ? `Best #${p.bestRankATP}` : 'NR' },
+	  current_rank: { label: '🌍 Ranking actuel',   emoji: '🌍', sort: (a, b) => (a.currentRankATP ?? 9999) - (b.currentRankATP ?? 9999), stat: p => p.currentRankATP ? `#${p.currentRankATP} (${p.currentPoints.toLocaleString()} pts)` : 'non classé' },
+	  titles_atp:   { label: '🏆 Titres ATP',       emoji: '🏆', sort: (a, b) => b.titlesATP      - a.titlesATP,     stat: p => `${p.titlesATP} titre${p.titlesATP > 1 ? 's' : ''}` },
+	  finals_atp:   { label: '🥈 Finales ATP',      emoji: '🥈', sort: (a, b) => b.finalsATP      - a.finalsATP,     stat: p => `${p.finalsATP} finale${p.finalsATP > 1 ? 's' : ''}` },
+	  gc:           { label: '🎳 Grand Chelems',    emoji: '🎳', sort: (a, b) => b.gcTitles        - a.gcTitles,      stat: p => `${p.gcTitles} GC` },
+	  titles_junior:{ label: '🎓 Titres Juniors',   emoji: '🎓', sort: (a, b) => b.titlesJunior    - a.titlesJunior,  stat: p => `${p.titlesJunior} titre${p.titlesJunior > 1 ? 's' : ''} junior` },
+	  finals_junior:{ label: '🎓 Finales Juniors',  emoji: '🎓', sort: (a, b) => b.finalsJunior    - a.finalsJunior,  stat: p => `${p.finalsJunior} finale${p.finalsJunior > 1 ? 's' : ''} junior` },
+	  winrate:      { label: '📈 Win Rate',         emoji: '📈', sort: (a, b) => b.winRate          - a.winRate,       stat: p => p.matchPlayed > 0 ? `${p.winRate.toFixed(1)}% (${p.matchWon}V/${p.matchPlayed - p.matchWon}D)` : '—' },
+	  prize:        { label: '💰 Prize Money',      emoji: '💰', sort: (a, b) => b.totalMoney       - a.totalMoney,    stat: p => p.totalMoney > 0 ? `${(p.totalMoney / 1000).toFixed(0)}k $` : '—' },
+	};
+
+	/**
+	 * Trie et construit l'embed Power Ranking selon le critère demandé.
+	 * @param {Array}  rawRanking  — tableau brut retourné par getPowerRankingData()
+	 * @param {string} sortKey     — clé dans PR_SORT_CONFIGS (défaut: 'score')
+	 */
+	function buildPowerRankingEmbed(rawRanking, sortKey = 'score') {
+	  const MEDALS = ['🥇', '🥈', '🥉'];
+	  const cfg    = PR_SORT_CONFIGS[sortKey] ?? PR_SORT_CONFIGS.score;
+
+	  // Clone + tri selon le critère actif
+	  const ranking = [...rawRanking].sort(cfg.sort);
+
+	  // Titre et couleur adaptés au critère
+	  const SORT_COLORS = {
+	    score: COLOR.gold, best_rank: COLOR.tennis, current_rank: COLOR.tennis,
+	    titles_atp: 0xE67E22, finals_atp: 0xBDC3C7, gc: 0xF39C12,
+	    titles_junior: 0x9B59B6, finals_junior: 0x8E44AD,
+	    winrate: COLOR.green, prize: 0x27AE60,
+	  };
 
 	  const embed = new EmbedBuilder()
-	    .setColor(COLOR.gold)
-	    .setTitle('👑 Power Ranking — Joueurs de la Simulation')
+	    .setColor(SORT_COLORS[sortKey] ?? COLOR.gold)
+	    .setTitle(`${cfg.emoji} Power Ranking — ${cfg.label}`)
 	    .setDescription(
-	      '> Classement des joueurs Discord basé sur leurs performances dans TM2026.\n' +
-	      '> Score composite : titres juniors, ranking ATP, prize money, win rate.\n\u200B'
+	      `> Classement trié par **${cfg.label}** · ${rawRanking.length} joueur${rawRanking.length > 1 ? 's' : ''} dans la simulation.\n\u200B`
 	    )
-	    .setFooter({ text: 'Tennis Manager 2026 · /power-ranking · Mis à jour en temps réel' })
+	    .setFooter({ text: `Tennis Manager 2026 · /power-ranking · Tri : ${cfg.label}` })
 	    .setTimestamp();
 
 	  if (!ranking.length) {
-	    embed.addFields({ name: '⚠️ Aucune donnée', value: 'Aucun joueur de la simulation n\'est encore lié à un personnage TM2026.\nUtilise `/link` pour associer les joueurs.' });
+	    embed.addFields({ name: '⚠️ Aucune donnée', value: 'Aucun joueur n\'est encore lié via `/link`.' });
 	    return embed;
 	  }
 
-	  // Podium top 3
+	  // ── Podium top 3 ──────────────────────────────────────────────────────────
 	  const podiumLines = ranking.slice(0, Math.min(3, ranking.length)).map((p, i) => {
 	    const medal     = MEDALS[i];
+	    const statStr   = cfg.stat(p);
 	    const rankStr   = p.currentRankATP ? `ATP #${p.currentRankATP}` : p.bestRankATP ? `Best #${p.bestRankATP}` : 'non classé';
-	    const moneyStr  = p.totalMoney > 0 ? `${(p.totalMoney / 1000).toFixed(0)}k $` : '—';
-	    const wrStr     = p.matchPlayed > 0 ? `${p.winRate.toFixed(0)}% WR` : '—';
-	    const juniorStr = p.titlesJunior > 0 ? ` · 🎓 ${p.titresJunior ?? p.titlesJunior}T` : '';
-	    const atpStr    = p.titlesATP > 0 ? ` · 🏆 ${p.titlesATP}T` : '';
-	    const gcStr     = p.gcTitles > 0 ? ` · 🎳 ${p.gcTitles}GC` : '';
+	    const juniorStr = p.titlesJunior > 0 ? ` 🎓${p.titlesJunior}T` : '';
+	    const atpStr    = p.titlesATP    > 0 ? ` 🏆${p.titlesATP}T`    : '';
+	    const gcStr     = p.gcTitles     > 0 ? ` 🎳${p.gcTitles}GC`    : '';
+	    // Ligne mise en avant = la stat du tri actif
 	    return (
 	      `${medal} **${p.ingameName}** *(${p.tmFullName} · ${p.country})*\n` +
-	      `┣ 📊 ${rankStr}${juniorStr}${atpStr}${gcStr}\n` +
-	      `┗ 💰 ${moneyStr}  ·  📈 ${wrStr}  ·  **${p.totalScore} pts**`
+	      `┣ ${cfg.emoji} ${statStr}\n` +
+	      `┗ ${rankStr}${juniorStr}${atpStr}${gcStr} · 📈 ${p.matchPlayed > 0 ? p.winRate.toFixed(0) + '%WR' : '—'}`
 	    );
 	  }).join('\n\n');
 
 	  embed.addFields({ name: '🏆 Podium', value: podiumLines || '—' });
 
-	  // Suite #4–#10
+	  // ── Suite #4–#10 ──────────────────────────────────────────────────────────
 	  if (ranking.length > 3) {
 	    const restLines = ranking.slice(3, Math.min(10, ranking.length)).map((p, i) => {
-	      const pos       = i + 4;
-	      const rankStr   = p.currentRankATP ? `#${p.currentRankATP}` : p.bestRankATP ? `best #${p.bestRankATP}` : 'NR';
-	      const juniorStr = p.titlesJunior > 0 ? ` 🎓${p.titlesJunior}` : '';
-	      const atpStr    = p.titlesATP > 0 ? ` 🏆${p.titlesATP}` : '';
-	      const wrStr     = p.matchPlayed > 0 ? ` ${p.winRate.toFixed(0)}%WR` : '';
-	      return `**${pos}.** ${p.ingameName} — ${rankStr}${juniorStr}${atpStr}${wrStr} · **${p.totalScore}pts**`;
+	      const pos     = i + 4;
+	      const statStr = cfg.stat(p);
+	      const rankStr = p.currentRankATP ? `#${p.currentRankATP}` : p.bestRankATP ? `best #${p.bestRankATP}` : 'NR';
+	      return `**${pos}.** ${p.ingameName} (${p.country}) — ${cfg.emoji} ${statStr}  ·  ${rankStr}`;
 	    }).join('\n');
 	    embed.addFields({ name: `🎾 Suite (#4–#${Math.min(10, ranking.length)})`, value: restLines });
 	  }
 
-	  // Légende
-	  embed.addFields({
-	    name: '📐 Calcul du score',
-	    value:
-	      '`Titre Junior ×5`  `Finale Junior ×2`  `Titre ATP ×8`  `Finale ATP ×3`  `GC ×15`\n' +
-	      '`Best Rank ATP → 200-rank pts`  `Rank actuel → 150-rank pts`\n' +
-	      '`Prize money / 50k (max 300)`  `+Win Rate %`',
-	    inline: false,
-	  });
+	  // ── Légende score (uniquement en mode global) ─────────────────────────────
+	  if (sortKey === 'score') {
+	    embed.addFields({
+	      name: '📐 Calcul du score composite',
+	      value:
+	        '`Titre Junior ×5`  `Finale Junior ×2`  `Titre ATP ×8`  `Finale ATP ×3`  `GC ×15`\n' +
+	        '`Best Rank → 200-rank`  `Rank actuel → 150-rank`  `Prize /50k (max 300)`  `+WinRate%`',
+	      inline: false,
+	    });
+	  }
 
 	  return embed;
+	}
+
+	/**
+	 * Génère les ActionRows de boutons de tri pour le Power Ranking.
+	 * Discord limite à 5 boutons par row et 5 rows par message.
+	 * On répartit les 10 tris sur 2 rows de 5.
+	 * Le bouton actif est mis en style Primary, les autres en Secondary.
+	 */
+	function buildPowerRankingComponents(activeSortKey = 'score') {
+	  // Row 1 : tris principaux
+	  const row1Keys = ['score', 'best_rank', 'current_rank', 'titles_atp', 'finals_atp'];
+	  // Row 2 : tris secondaires
+	  const row2Keys = ['gc', 'titles_junior', 'finals_junior', 'winrate', 'prize'];
+
+	  const makeButton = (key) => {
+	    const cfg = PR_SORT_CONFIGS[key];
+	    return new ButtonBuilder()
+	      .setCustomId(`pr_sort:${key}`)
+	      .setLabel(cfg.label)
+	      .setStyle(key === activeSortKey ? ButtonStyle.Primary : ButtonStyle.Secondary);
+	  };
+
+	  return [
+	    new ActionRowBuilder().addComponents(row1Keys.map(makeButton)),
+	    new ActionRowBuilder().addComponents(row2Keys.map(makeButton)),
+	  ];
 	}
 
 	// Détecte si TournamentCategory existe et a une colonne Type
@@ -2683,7 +2737,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
     if (!ranking)
       return interaction.editReply({ embeds: [err('Impossible de calculer le Power Ranking.\nVérifie que le save.db est bien chargé.')] });
 
-    return interaction.editReply({ embeds: [buildPowerRankingEmbed(ranking)] });
+    return interaction.editReply({
+      embeds: [buildPowerRankingEmbed(ranking, 'score')],
+      components: buildPowerRankingComponents('score'),
+    });
   }
 
   // ── /tournoi ──────────────────────────────────────────────────────────────────
@@ -4287,6 +4344,29 @@ function buildProfilNavButtons(tmName) {
 		  components: buildClassementComponents(page, rows.length),
 		});
 	  });
+
+  // ── Boutons tri Power Ranking ──────────────────────────────────────────────
+  client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+    if (!interaction.customId.startsWith('pr_sort:')) return;
+
+    const sortKey = interaction.customId.split(':')[1];
+    if (!PR_SORT_CONFIGS[sortKey]) return;
+
+    await interaction.deferUpdate();
+
+    if (!seasonDbReady)
+      return interaction.editReply({ embeds: [err('Save.db non disponible.')], components: [] });
+
+    const ranking = await getPowerRankingData();
+    if (!ranking)
+      return interaction.editReply({ embeds: [err('Impossible de recalculer le Power Ranking.')], components: [] });
+
+    return interaction.editReply({
+      embeds: [buildPowerRankingEmbed(ranking, sortKey)],
+      components: buildPowerRankingComponents(sortKey),
+    });
+  });
 
 
   // ── Boutons tournoi : navigation par année ─────────────────────────────────────
