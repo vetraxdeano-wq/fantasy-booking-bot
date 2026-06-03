@@ -896,6 +896,264 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  finally { s.close(); }
 	}
 
+	// ══════════════════════════════════════════════════════════════════════════════
+	//  POWER RANKING — Classement des joueurs de la simulation
+	// ══════════════════════════════════════════════════════════════════════════════
+
+	/**
+	 * Construit le Power Ranking des joueurs de la simulation.
+	 * Récupère tous les players Supabase ayant un tm_player_id,
+	 * puis lit leurs stats dans le save.db pour calculer un score composite.
+	 *
+	 * Critères pondérés :
+	 *   Titre Junior ×5 · Finale Junior ×2
+	 *   Titre ATP ×8   · Finale ATP ×3   · GC ×15
+	 *   Best Rank ATP → 200-rank pts     · Rank actuel → 150-rank pts
+	 *   Prize money / 50 000 (max 300)   · +Win Rate %
+	 */
+	async function getPowerRankingData() {
+	  if (!seasonDbReady) return null;
+	  const s = openSaveDb();
+	  if (!s) return null;
+
+	  try {
+	    const { data: simuPlayers } = await supabase
+	      .from('players')
+	      .select('discord_id, ingame_name, tm_player_id, character_photo')
+	      .not('tm_player_id', 'is', null);
+
+	    if (!simuPlayers?.length) return [];
+
+	    const juniorCatIds = getJuniorCategoryIds(s);
+	    const { clause: jExcl, ids: jIds } = buildJuniorExcludeClause(juniorCatIds);
+	    const { clause: jIncl, ids: jIdsIncl } = (() => {
+	      const nameFilter = `(lower(t.Name) LIKE '%junior%'
+	        OR t.Name LIKE 'J %' OR t.Name LIKE 'J-%'
+	        OR t.Name GLOB 'J[0-9]*' OR t.Name GLOB 'J[A-Z]*')`;
+	      if (juniorCatIds.size === 0) return { clause: nameFilter, ids: [] };
+	      const ids = [...juniorCatIds];
+	      const ph  = ids.map(() => '?').join(',');
+	      return { clause: `(t.CategoryId IN (${ph}) OR ${nameFilter})`, ids };
+	    })();
+
+	    // Colonne prize money (détection dynamique)
+	    const trCols   = s.prepare('PRAGMA table_info(TournamentResult)').all().map(c => c.name);
+	    const moneyCol = trCols.find(c => /money/i.test(c)) ?? null;
+
+	    const ranking = [];
+
+	    for (const sp of simuPlayers) {
+	      const tmId = sp.tm_player_id;
+
+	      const pRow = s.prepare('SELECT Firstname, Lastname, Country, DateOfBirth FROM TennisPlayer WHERE Id=?').get(tmId);
+	      if (!pRow) continue;
+
+	      // Classement ATP actuel
+	      const rankRow = s.prepare(
+	        'SELECT Rank, Points FROM Ranking WHERE PlayerId=? AND Circuit=0 ORDER BY Date DESC LIMIT 1'
+	      ).get(tmId) ?? {};
+	      const currentRankATP = rankRow.Rank != null ? rankRow.Rank + 1 : null;
+	      const currentPoints  = rankRow.Points ?? 0;
+
+	      // Meilleur ranking ATP carrière
+	      const bestRankRow = s.prepare(
+	        'SELECT MIN(Rank) AS best FROM Ranking WHERE PlayerId=? AND Circuit=0'
+	      ).get(tmId) ?? {};
+	      const bestRankATP = bestRankRow.best != null ? bestRankRow.best + 1 : null;
+
+	      // Meilleur ranking Junior
+	      const bestRankJuniorRow = s.prepare(
+	        'SELECT MIN(Rank) AS best FROM Ranking WHERE PlayerId=? AND Circuit=1'
+	      ).get(tmId) ?? {};
+	      const bestRankJunior = bestRankJuniorRow.best != null ? bestRankJuniorRow.best + 1 : null;
+
+	      // Titres & finales ATP (hors junior)
+	      const titlesATP = s.prepare(`
+	        SELECT COUNT(*) AS cnt FROM TournamentResult tr
+	        JOIN Tournament t ON t.Id = tr.TournamentId
+	        WHERE tr.PlayerId=? AND tr.RoundReached=-1 AND ${jExcl}
+	          AND t.Name IS NOT NULL AND trim(t.Name) != ''
+	          AND lower(t.Name) NOT LIKE '%estimated%'
+	          AND lower(t.Name) NOT LIKE '%unknown%'
+	      `).get(tmId, ...jIds)?.cnt ?? 0;
+
+	      const finalsATP = s.prepare(`
+	        SELECT COUNT(*) AS cnt FROM TournamentResult tr
+	        JOIN Tournament t ON t.Id = tr.TournamentId
+	        WHERE tr.PlayerId=? AND tr.RoundReached=0 AND ${jExcl}
+	          AND t.Name IS NOT NULL AND trim(t.Name) != ''
+	          AND lower(t.Name) NOT LIKE '%estimated%'
+	          AND lower(t.Name) NOT LIKE '%unknown%'
+	      `).get(tmId, ...jIds)?.cnt ?? 0;
+
+	      // Titres & finales Junior
+	      const titlesJunior = s.prepare(`
+	        SELECT COUNT(*) AS cnt FROM TournamentResult tr2
+	        JOIN Tournament t2 ON t2.Id = tr2.TournamentId
+	        WHERE tr2.PlayerId=? AND tr2.RoundReached=-1
+	          AND ${jIncl.replace(/\bt\b/g, 't2')}
+	          AND t2.Name IS NOT NULL AND trim(t2.Name) != ''
+	          AND lower(t2.Name) NOT LIKE '%estimated%'
+	          AND lower(t2.Name) NOT LIKE '%unknown%'
+	      `).get(tmId, ...jIdsIncl)?.cnt ?? 0;
+
+	      const finalsJunior = s.prepare(`
+	        SELECT COUNT(*) AS cnt FROM TournamentResult tr3
+	        JOIN Tournament t3 ON t3.Id = tr3.TournamentId
+	        WHERE tr3.PlayerId=? AND tr3.RoundReached=0
+	          AND ${jIncl.replace(/\bt\b/g, 't3')}
+	          AND t3.Name IS NOT NULL AND trim(t3.Name) != ''
+	          AND lower(t3.Name) NOT LIKE '%estimated%'
+	          AND lower(t3.Name) NOT LIKE '%unknown%'
+	      `).get(tmId, ...jIdsIncl)?.cnt ?? 0;
+
+	      // Bilan V/D ATP
+	      const statsRow = s.prepare(`
+	        SELECT SUM(MatchPlayed) AS played, SUM(MatchWon) AS won
+	        FROM TennisPlayerStatistics WHERE PlayerId=? AND Circuit=0
+	      `).get(tmId) ?? {};
+	      const matchPlayed = statsRow.played ?? 0;
+	      const matchWon    = statsRow.won ?? 0;
+	      const winRate     = matchPlayed > 0 ? (matchWon / matchPlayed) * 100 : 0;
+
+	      // Prize money total
+	      const totalMoney = moneyCol
+	        ? (s.prepare(`SELECT SUM(${moneyCol}) AS total FROM TournamentResult WHERE PlayerId=?`).get(tmId)?.total ?? 0)
+	        : 0;
+
+	      // Grand Chelems ATP
+	      const gcTitles = s.prepare(`
+	        SELECT COUNT(*) AS cnt FROM TournamentResult tr
+	        JOIN Tournament t ON t.Id = tr.TournamentId
+	        LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+	        WHERE tr.PlayerId=? AND tr.RoundReached=-1
+	          AND (tc.Type=1 OR (tc.Type IS NULL AND (
+	            lower(t.Name) LIKE '%grand chelem%'
+	            OR lower(t.Name) LIKE '%australian open%'
+	            OR lower(t.Name) LIKE '%roland garros%'
+	            OR lower(t.Name) LIKE '%wimbledon%'
+	            OR lower(t.Name) LIKE '%us open%'
+	          )))
+	          AND ${jExcl}
+	      `).get(tmId, ...jIds)?.cnt ?? 0;
+
+	      // Score composite
+	      const scoreJuniorTitles  = titlesJunior * 5;
+	      const scoreJuniorFinals  = finalsJunior * 2;
+	      const scoreATPTitles     = titlesATP * 8;
+	      const scoreATPFinals     = finalsATP * 3;
+	      const scoreGC            = gcTitles * 15;
+	      const scoreBestRank      = bestRankATP    != null ? Math.max(0, 200 - bestRankATP)    : 0;
+	      const scoreCurrentRank   = currentRankATP != null ? Math.max(0, 150 - currentRankATP) : 0;
+	      const scoreMoney         = Math.min(300, Math.round(totalMoney / 50000));
+	      const scoreWinRate       = Math.round(winRate);
+
+	      const totalScore = scoreJuniorTitles + scoreJuniorFinals
+	        + scoreATPTitles + scoreATPFinals + scoreGC
+	        + scoreBestRank + scoreCurrentRank
+	        + scoreMoney + scoreWinRate;
+
+	      ranking.push({
+	        discordId:      sp.discord_id,
+	        ingameName:     sp.ingame_name,
+	        tmFullName:     `${pRow.Firstname} ${pRow.Lastname}`,
+	        country:        pRow.Country ?? '—',
+	        currentRankATP,
+	        currentPoints,
+	        bestRankATP,
+	        bestRankJunior,
+	        gcTitles,
+	        titlesATP,
+	        finalsATP,
+	        titlesJunior,
+	        finalsJunior,
+	        matchPlayed,
+	        matchWon,
+	        winRate,
+	        totalMoney,
+	        totalScore,
+	      });
+	    }
+
+	    ranking.sort((a, b) => {
+	      if (b.totalScore !== a.totalScore) return b.totalScore - a.totalScore;
+	      const ra = a.currentRankATP ?? 9999;
+	      const rb = b.currentRankATP ?? 9999;
+	      return ra - rb;
+	    });
+
+	    return ranking;
+	  } catch (e) {
+	    console.error('[PowerRanking] Erreur:', e.message);
+	    return null;
+	  } finally {
+	    s.close();
+	  }
+	}
+
+	function buildPowerRankingEmbed(ranking) {
+	  const MEDALS      = ['🥇', '🥈', '🥉'];
+	  const RANK_EMOJIS = ['👑', '⭐', '🌟', '💫', '✨', '🎾', '🎾', '🎾', '🎾', '🎾'];
+
+	  const embed = new EmbedBuilder()
+	    .setColor(COLOR.gold)
+	    .setTitle('👑 Power Ranking — Joueurs de la Simulation')
+	    .setDescription(
+	      '> Classement des joueurs Discord basé sur leurs performances dans TM2026.\n' +
+	      '> Score composite : titres juniors, ranking ATP, prize money, win rate.\n\u200B'
+	    )
+	    .setFooter({ text: 'Tennis Manager 2026 · /power-ranking · Mis à jour en temps réel' })
+	    .setTimestamp();
+
+	  if (!ranking.length) {
+	    embed.addFields({ name: '⚠️ Aucune donnée', value: 'Aucun joueur de la simulation n\'est encore lié à un personnage TM2026.\nUtilise `/link` pour associer les joueurs.' });
+	    return embed;
+	  }
+
+	  // Podium top 3
+	  const podiumLines = ranking.slice(0, Math.min(3, ranking.length)).map((p, i) => {
+	    const medal     = MEDALS[i];
+	    const rankStr   = p.currentRankATP ? `ATP #${p.currentRankATP}` : p.bestRankATP ? `Best #${p.bestRankATP}` : 'non classé';
+	    const moneyStr  = p.totalMoney > 0 ? `${(p.totalMoney / 1000).toFixed(0)}k $` : '—';
+	    const wrStr     = p.matchPlayed > 0 ? `${p.winRate.toFixed(0)}% WR` : '—';
+	    const juniorStr = p.titlesJunior > 0 ? ` · 🎓 ${p.titresJunior ?? p.titlesJunior}T` : '';
+	    const atpStr    = p.titlesATP > 0 ? ` · 🏆 ${p.titlesATP}T` : '';
+	    const gcStr     = p.gcTitles > 0 ? ` · 🎳 ${p.gcTitles}GC` : '';
+	    return (
+	      `${medal} **${p.ingameName}** *(${p.tmFullName} · ${p.country})*\n` +
+	      `┣ 📊 ${rankStr}${juniorStr}${atpStr}${gcStr}\n` +
+	      `┗ 💰 ${moneyStr}  ·  📈 ${wrStr}  ·  **${p.totalScore} pts**`
+	    );
+	  }).join('\n\n');
+
+	  embed.addFields({ name: '🏆 Podium', value: podiumLines || '—' });
+
+	  // Suite #4–#10
+	  if (ranking.length > 3) {
+	    const restLines = ranking.slice(3, Math.min(10, ranking.length)).map((p, i) => {
+	      const pos       = i + 4;
+	      const rankStr   = p.currentRankATP ? `#${p.currentRankATP}` : p.bestRankATP ? `best #${p.bestRankATP}` : 'NR';
+	      const juniorStr = p.titlesJunior > 0 ? ` 🎓${p.titlesJunior}` : '';
+	      const atpStr    = p.titlesATP > 0 ? ` 🏆${p.titlesATP}` : '';
+	      const wrStr     = p.matchPlayed > 0 ? ` ${p.winRate.toFixed(0)}%WR` : '';
+	      return `**${pos}.** ${p.ingameName} — ${rankStr}${juniorStr}${atpStr}${wrStr} · **${p.totalScore}pts**`;
+	    }).join('\n');
+	    embed.addFields({ name: `🎾 Suite (#4–#${Math.min(10, ranking.length)})`, value: restLines });
+	  }
+
+	  // Légende
+	  embed.addFields({
+	    name: '📐 Calcul du score',
+	    value:
+	      '`Titre Junior ×5`  `Finale Junior ×2`  `Titre ATP ×8`  `Finale ATP ×3`  `GC ×15`\n' +
+	      '`Best Rank ATP → 200-rank pts`  `Rank actuel → 150-rank pts`\n' +
+	      '`Prize money / 50k (max 300)`  `+Win Rate %`',
+	    inline: false,
+	  });
+
+	  return embed;
+	}
+
 	// Détecte si TournamentCategory existe et a une colonne Type
 	// Dans ce schéma : Tournament.CategoryId -> TournamentCategory.Id (colonne Type = niveau)
 	function getTournCategoryJoin(s) {
@@ -1810,6 +2068,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.addStringOption(o => o.setName('tournoi').setDescription('Nom du tournoi (ex: Roland Garros, Wimbledon...)').setRequired(true))
 		.addStringOption(o => o.setName('joueur').setDescription('Nom TM2026 du joueur à consulter (toi par défaut)').setRequired(false))
 		.addIntegerOption(o => o.setName('annee').setDescription('Année spécifique (ex: 2026) — optionnel').setRequired(false)),
+
+  new SlashCommandBuilder()
+		.setName('power-ranking')
+		.setDescription('👑 Power Ranking des joueurs de la simulation (titres juniors, ranking ATP, prize money, winrate)'),
 	];
 
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -2407,6 +2669,21 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  .setTimestamp(),
 	  ] });
 	}
+  }
+
+  // ── /power-ranking ────────────────────────────────────────────────────────
+  if (cmd === 'power-ranking') {
+    await interaction.deferReply();
+
+    if (!seasonDbReady)
+      return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+
+    const ranking = await getPowerRankingData();
+
+    if (!ranking)
+      return interaction.editReply({ embeds: [err('Impossible de calculer le Power Ranking.\nVérifie que le save.db est bien chargé.')] });
+
+    return interaction.editReply({ embeds: [buildPowerRankingEmbed(ranking)] });
   }
 
   // ── /tournoi ──────────────────────────────────────────────────────────────────
