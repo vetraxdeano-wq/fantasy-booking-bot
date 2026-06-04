@@ -777,7 +777,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	// ── Catégories de tournois ───────────────────────────────────────────────────
 	const TOURN_CAT = { 1: 'Grand Chelem', 2: 'Masters 1000', 3: 'ATP 500', 5: 'ATP 250', 6: 'ATP 125', 7: 'ATP 100', 8: 'ATP 75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen Finals' };
-	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🥇', 3: '🥈', 5: '🥉', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
+	const TOURN_CAT_EMOJI = { 1: '🏆', 2: '🔥', 3: '🎯', 5: '🎾', 6: '🎾', 7: '🎾', 8: '🎾', 9: '🎾', 16: '👑', 17: '⭐' };
 	const TOURN_CAT_IMPORTANT_MAX = 2; // GC (1) + Masters 1000 (2)
 	const TOURN_CAT_SHORT = { 1: 'GC', 2: 'M1000', 3: 'ATP500', 5: 'ATP250', 6: 'ATP125', 7: 'ATP100', 8: 'ATP75', 9: 'Challenger', 16: 'Masters Cup', 17: 'Next Gen' };
 
@@ -2162,6 +2162,27 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		.addIntegerOption(o => o.setName('annee').setDescription('Année de la saison (ex: 2026)').setRequired(true).setMinValue(1990).setMaxValue(2100))
 		.addUserOption(o => o.setName('joueur').setDescription('Joueur Discord (toi par défaut)').setRequired(false))
 		.addStringOption(o => o.setName('nom').setDescription('Ou chercher par nom TM2026 (ex: Federer)').setRequired(false)),
+
+  new SlashCommandBuilder()
+    .setName('tops')
+    .setDescription('🏆 Classements spéciaux : meilleurs par surface ou en Grand Chelem')
+    .addSubcommand(s => s
+      .setName('surface')
+      .setDescription('Top 10 joueurs par surface (winrate V/D, min 10 matchs)')
+      .addIntegerOption(o => o
+        .setName('surface')
+        .setDescription('Surface à filtrer (toutes par défaut)')
+        .setRequired(false)
+        .addChoices(
+          { name: '🔶 Terre battue', value: 1 },
+          { name: '🟩 Gazon',        value: 2 },
+          { name: '🔷 Dur',          value: 3 },
+          { name: '🏟️ Dur indoor',   value: 4 },
+        )))
+    .addSubcommand(s => s
+      .setName('gc')
+      .setDescription('Meilleurs résultats en Grand Chelem (victoires + meilleur parcours)'))
+  ,
 	];
 
 	// ══════════════════════════════════════════════════════════════════════════════
@@ -2964,8 +2985,9 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		const refTourn   = (atpBlock ? atpTournois : juniorTournois)[0];
 		const isJunior   = !atpBlock;
 		const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
-		const catEmoji   = isJunior ? '🎓' : TOURN_CAT_EMOJI[refTourn?.CategoryId] ?? '🎾';
-		const { label: catLabel } = resolveCatLabel(s, refTourn?.CategoryId);
+		const _normCatId = isJunior ? null : normalizeTournCat(refTourn?.CategoryId, refTourn?.Name);
+		const catEmoji   = isJunior ? '🎓' : (TOURN_CAT_EMOJI[_normCatId] ?? '🎾');
+		const { label: catLabel } = isJunior ? { label: 'Junior' } : (TOURN_CAT[_normCatId] ? { label: TOURN_CAT[_normCatId] } : resolveCatLabel(s, refTourn?.CategoryId));
 
 		const embed = new EmbedBuilder()
 		  .setColor(mainBlock.titles > 0 ? COLOR.gold : COLOR.tennis)
@@ -3029,9 +3051,10 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  if (!tourn)
 		return interaction.editReply({ embeds: [err(`Tournoi introuvable : **${nomTournoi}**\nEssaie un nom plus précis (ex: \`Roland Garros\`, \`Wimbledon\`, \`US Open\`...)`)] });
 
-	  const { label: catLabel, isJunior: catIsJunior } = resolveCatLabel(s, tourn.CategoryId);
+	  const _normCatId2 = normalizeTournCat(tourn.CategoryId, tourn.Name);
+	  const { label: catLabel, isJunior: catIsJunior } = TOURN_CAT[_normCatId2] ? { label: TOURN_CAT[_normCatId2], isJunior: false } : resolveCatLabel(s, tourn.CategoryId);
 	  const isJunior   = catIsJunior || isJuniorTournament(tourn.Name);
-	  const catEmoji   = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
+	  const catEmoji   = isJunior ? '🎓' : (TOURN_CAT_EMOJI[_normCatId2] ?? '🎾');
 	  const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
 	  const ptsLabel   = isJunior ? 'Points Junior' : 'Points ATP';
 
@@ -3249,6 +3272,151 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		  });
 		}
 	  }
+
+  // ── /tops ─────────────────────────────────────────────────────────────────────
+  if (cmd === 'tops') {
+    await interaction.deferReply();
+
+    if (!seasonDbReady)
+      return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+
+    const sub = interaction.options.getSubcommand();
+
+    // ── /tops surface ────────────────────────────────────────────────────────
+    if (sub === 'surface') {
+      const surfFilter = interaction.options.getInteger('surface'); // null = toutes
+      const s = openSaveDb();
+      if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
+      try {
+        // Surfaces à afficher : soit la surface demandée, soit toutes
+        const surfaces = surfFilter ? [surfFilter] : [1, 2, 3, 4];
+
+        const embed = new EmbedBuilder()
+          .setColor(COLOR.tennis)
+          .setTitle(surfFilter
+            ? `🎾 Top joueurs — ${SURFACE_LABEL[surfFilter] ?? `Surface ${surfFilter}`}`
+            : '🎾 Top joueurs par surface')
+          .setFooter({ text: 'Tennis Manager 2026 · /tops surface · min. 10 matchs' })
+          .setTimestamp();
+
+        let hasAny = false;
+        for (const surf of surfaces) {
+          const rows = s.prepare(`
+            SELECT
+              tp.Firstname || ' ' || tp.Lastname AS name,
+              tp.Country,
+              SUM(tps.MatchPlayed) AS played,
+              SUM(tps.MatchWon)    AS won
+            FROM TennisPlayerStatistics tps
+            JOIN TennisPlayer tp ON tp.Id = tps.PlayerId
+            WHERE tps.Circuit = 0
+              AND tps.Surface = ?
+            GROUP BY tps.PlayerId
+            HAVING played >= 10
+            ORDER BY (CAST(won AS REAL) / played) DESC
+            LIMIT 10
+          `).all(surf);
+
+          if (!rows.length) continue;
+          hasAny = true;
+
+          const lines = rows.map((r, i) => {
+            const wr  = pct(r.won, r.played);
+            const pos = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`${i + 1}.\``;
+            return `${pos} **${r.name}** (${r.Country ?? '??'}) — **${r.won}V/${r.played - r.won}D** (${wr})`;
+          }).join('\n');
+
+          embed.addFields({
+            name: SURFACE_LABEL[surf] ?? `Surface ${surf}`,
+            value: lines,
+          });
+        }
+
+        if (!hasAny)
+          embed.setDescription('*Aucune donnée de surface disponible (min. 10 matchs).*');
+
+        return interaction.editReply({ embeds: [embed] });
+      } finally { s.close(); }
+    }
+
+    // ── /tops gc ─────────────────────────────────────────────────────────────
+    if (sub === 'gc') {
+      const s = openSaveDb();
+      if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
+      try {
+        // Identifier les catégories GC (type=1 ou nom contenant "grand chelem")
+        const gcRows = s.prepare(`
+          SELECT
+            tp.Firstname || ' ' || tp.Lastname AS name,
+            tp.Country,
+            COUNT(CASE WHEN tr.RoundReached = -1 THEN 1 END) AS titres,
+            COUNT(CASE WHEN tr.RoundReached =  0 THEN 1 END) AS finales,
+            COUNT(CASE WHEN tr.RoundReached =  1 THEN 1 END) AS demis,
+            COUNT(CASE WHEN tr.RoundReached =  2 THEN 1 END) AS quarts,
+            MIN(tr.RoundReached)                              AS bestRound,
+            COUNT(*) AS participations
+          FROM TournamentResult tr
+          JOIN Tournament t  ON t.Id  = tr.TournamentId
+          JOIN TennisPlayer tp ON tp.Id = tr.PlayerId
+          LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+          WHERE (tc.Type = 1
+             OR (tc.Type IS NULL AND lower(t.Name) LIKE '%grand chelem%')
+             OR (tc.Type IS NULL AND (
+                  lower(t.Name) LIKE '%roland%'
+               OR lower(t.Name) LIKE '%wimbledon%'
+               OR lower(t.Name) LIKE '%us open%'
+               OR lower(t.Name) LIKE '%australian%'
+             )))
+          GROUP BY tr.PlayerId
+          HAVING participations >= 1
+          ORDER BY titres DESC, finales DESC, demis DESC, quarts DESC
+          LIMIT 20
+        `).all();
+
+        const embed = new EmbedBuilder()
+          .setColor(COLOR.gold)
+          .setTitle('🏆 Meilleurs résultats en Grand Chelem')
+          .setFooter({ text: 'Tennis Manager 2026 · /tops gc' })
+          .setTimestamp();
+
+        if (!gcRows.length) {
+          embed.setDescription('*Aucune donnée Grand Chelem disponible.*');
+          return interaction.editReply({ embeds: [embed] });
+        }
+
+        // Séparer les titrés et les non-titrés
+        const titrés  = gcRows.filter(r => r.titres > 0);
+        const autresGC = gcRows.filter(r => r.titres === 0);
+
+        const roundStr = (r) => {
+          const best = ROUND_LABEL[String(r.bestRound)] ?? `Tour ${r.bestRound}`;
+          const parts = [];
+          if (r.titres  > 0) parts.push(`🏆 ×${r.titres}`);
+          if (r.finales > 0) parts.push(`🥈 ×${r.finales}`);
+          if (r.demis   > 0) parts.push(`🥉 ×${r.demis}`);
+          if (r.quarts  > 0) parts.push(`⚡ ×${r.quarts}`);
+          return `${parts.join('  ')}${parts.length ? '  ·  ' : ''}Meilleur : **${best}** · ${r.participations} part.`;
+        };
+
+        if (titrés.length) {
+          const lines = titrés.map((r, i) => {
+            const pos = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`${i + 1}.\``;
+            return `${pos} **${r.name}** (${r.Country ?? '??'}) — ${roundStr(r)}`;
+          }).join('\n');
+          embed.addFields({ name: `🏆 Palmarès GC — ${titrés.length} joueur${titrés.length > 1 ? 's' : ''} titré${titrés.length > 1 ? 's' : ''}`, value: lines.slice(0, 1024) });
+        }
+
+        if (autresGC.length) {
+          const lines = autresGC.slice(0, 10).map((r, i) => {
+            return `\`${i + 1}.\` **${r.name}** (${r.Country ?? '??'}) — ${roundStr(r)}`;
+          }).join('\n');
+          embed.addFields({ name: '🎾 Meilleurs parcours sans titre', value: lines.slice(0, 1024) });
+        }
+
+        return interaction.editReply({ embeds: [embed] });
+      } finally { s.close(); }
+    }
+  }
 
   // ── /saison ───────────────────────────────────────────────────────────────────
   if (cmd === 'saison') {
@@ -4692,7 +4860,9 @@ function buildProfilNavButtons(tmName) {
 		catLabel = catLabel ?? `Cat. ${tourn.CategoryId}`;
 	  }
 	  if (!isJunior) isJunior = /junior|juniors/i.test(tourn.Name);
-	  const catEmoji   = TOURN_CAT_EMOJI[tourn.CategoryId] ?? (isJunior ? '🎓' : '🎾');
+	  const _normCatId3 = isJunior ? tourn.CategoryId : normalizeTournCat(tourn.CategoryId, tourn.Name);
+	  if (!isJunior && TOURN_CAT[_normCatId3]) catLabel = TOURN_CAT[_normCatId3];
+	  const catEmoji   = isJunior ? '🎓' : (TOURN_CAT_EMOJI[_normCatId3] ?? '🎾');
 	  const circuitTag = isJunior ? '🎓 Junior' : '🏆 ATP';
 	  const ptsLabel   = isJunior ? 'Points Junior' : 'Points ATP';
 
