@@ -3414,7 +3414,8 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
               COUNT(CASE WHEN tr.RoundReached =  0 THEN 1 END) AS finales,
               COUNT(CASE WHEN tr.RoundReached =  1 THEN 1 END) AS demis,
               COUNT(CASE WHEN tr.RoundReached =  2 THEN 1 END) AS quarts,
-              COUNT(*) AS participations
+              COUNT(*) AS participations,
+              MIN(tr.RoundReached) AS bestResult
             FROM TournamentResult tr
             JOIN Tournament t    ON t.Id  = tr.TournamentId
             JOIN TennisPlayer tp ON tp.Id = tr.PlayerId
@@ -3424,7 +3425,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
               AND tp.Id IN (${ph})
             GROUP BY tr.PlayerId
             HAVING participations >= 1
-            ORDER BY titres DESC, finales DESC, demis DESC, quarts DESC
+            ORDER BY titres DESC, bestResult ASC, finales DESC, demis DESC, quarts DESC
             LIMIT 15
           `).all(gc.like, ...jIds, ...simIds);
 
