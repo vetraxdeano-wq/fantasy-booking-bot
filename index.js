@@ -3647,43 +3647,81 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		totalPts   > 0 ? `📊 Points ATP totaux : **${totalPts.toLocaleString()}**` : null,
 	  ].filter(Boolean);
 
-	  const embed = new EmbedBuilder()
-		.setColor(titles > 0 ? COLOR.gold : COLOR.tennis)
-		.setTitle(`📅 Saison ${annee} — ${pDisplayName}`)
-		.setDescription(descLines.join('\n'))
-		.addFields(
-		  { name: '🏆 Titres', value: `**${titles}**`, inline: true },
-		  { name: '🥈 Finales', value: `**${finals}**`, inline: true },
-		  { name: '🎾 Tournois', value: `**${results.length}**`, inline: true },
-		)
-		.setFooter({ text: `Tennis Manager 2026 · /saison` })
-		.setTimestamp();
-
-	  // Résultats ATP (chunks si > 1024)
-	  if (atpLines.length > 0) {
-		let chunk = '';
-		let chunkIdx = 1;
-		const flushChunk = (label) => { if (chunk) embed.addFields({ name: label, value: chunk }); };
-		for (const line of atpLines) {
-		  const next = chunk ? chunk + '\n' + line : line;
-		  if (next.length > 1020) {
-			flushChunk(`🏆 Résultats ATP${atpLines.length > 20 ? ` — partie ${chunkIdx}` : ''}`);
-			chunk = line;
-			chunkIdx++;
-		  } else {
-			chunk = next;
-		  }
+	  // ── Fonction de construction de l'embed avec tri ───────────────────────
+	  const buildSaisonEmbed = (sortMode = 'cat') => {
+		let sortedAtp = [...atpResults];
+		let sortLabel = '';
+		if (sortMode === 'points') {
+		  sortedAtp.sort((a, b) => (b.PointsMain ?? 0) - (a.PointsMain ?? 0));
+		  sortLabel = ' · tri : 📊 points';
+		} else if (sortMode === 'titre') {
+		  sortedAtp.sort((a, b) => {
+			// Meilleur parcours d'abord (RoundReached le plus bas = -1 titre)
+			const rA = a.RoundReached ?? 99;
+			const rB = b.RoundReached ?? 99;
+			if (rA !== rB) return rA - rB;
+			// À égalité de parcours : par catégorie (GC > M1000 > ...)
+			return (a.CategoryId ?? 99) - (b.CategoryId ?? 99);
+		  });
+		  sortLabel = ' · tri : 🏆 parcours';
+		} else {
+		  // défaut : par catégorie puis prize money
+		  sortedAtp.sort((a, b) => {
+			if ((a.CategoryId ?? 99) !== (b.CategoryId ?? 99)) return (a.CategoryId ?? 99) - (b.CategoryId ?? 99);
+			return (b.MoneyWon ?? 0) - (a.MoneyWon ?? 0);
+		  });
 		}
-		flushChunk(`🏆 Résultats ATP${chunkIdx > 1 ? ` — partie ${chunkIdx}` : ''} (${atpResults.length})`);
-	  }
 
-	  // Résultats Junior
-	  if (juniorLines.length > 0) {
-		const jrFull = juniorLines.join('\n');
-		embed.addFields({ name: `🎓 Résultats Junior (${juniorResults.length})`, value: jrFull.length <= 1024 ? jrFull : jrFull.slice(0, 1021) + '…' });
-	  }
+		const sortedAtpLines = buildResultLines(sortedAtp);
+		const sortedJrLines  = buildResultLines(juniorResults);
 
-	  return interaction.editReply({ embeds: [embed] });
+		const e = new EmbedBuilder()
+		  .setColor(titles > 0 ? COLOR.gold : COLOR.tennis)
+		  .setTitle(`📅 Saison ${annee} — ${pDisplayName}${sortLabel}`)
+		  .setDescription(descLines.join('\n'))
+		  .addFields(
+			{ name: '🏆 Titres',   value: `**${titles}**`,          inline: true },
+			{ name: '🥈 Finales',  value: `**${finals}**`,          inline: true },
+			{ name: '🎾 Tournois', value: `**${results.length}**`,  inline: true },
+		  )
+		  .setFooter({ text: `Tennis Manager 2026 · /saison` })
+		  .setTimestamp();
+
+		// Résultats ATP (chunks si > 1024)
+		if (sortedAtpLines.length > 0) {
+		  let chunk = '';
+		  let chunkIdx = 1;
+		  const flushChunk = (label) => { if (chunk) e.addFields({ name: label, value: chunk }); };
+		  for (const line of sortedAtpLines) {
+			const next = chunk ? chunk + '\n' + line : line;
+			if (next.length > 1020) {
+			  flushChunk(`🏆 Résultats ATP${sortedAtpLines.length > 20 ? ` — partie ${chunkIdx}` : ''}`);
+			  chunk = line;
+			  chunkIdx++;
+			} else {
+			  chunk = next;
+			}
+		  }
+		  flushChunk(`🏆 Résultats ATP${chunkIdx > 1 ? ` — partie ${chunkIdx}` : ''} (${sortedAtp.length})`);
+		}
+
+		// Résultats Junior
+		if (sortedJrLines.length > 0) {
+		  const jrFull = sortedJrLines.join('\n');
+		  e.addFields({ name: `🎓 Résultats Junior (${juniorResults.length})`, value: jrFull.length <= 1024 ? jrFull : jrFull.slice(0, 1021) + '…' });
+		}
+
+		return e;
+	  };
+
+	  // ── Boutons de tri ────────────────────────────────────────────────────
+	  const saison_key = `${tmId}_${annee}`;
+	  const btnCat    = new ButtonBuilder().setCustomId(`saison_sort:cat:${saison_key}`).setLabel('Par catégorie').setEmoji('🎾').setStyle(ButtonStyle.Secondary);
+	  const btnPts    = new ButtonBuilder().setCustomId(`saison_sort:points:${saison_key}`).setLabel('Par points').setEmoji('📊').setStyle(ButtonStyle.Primary);
+	  const btnTitre  = new ButtonBuilder().setCustomId(`saison_sort:titre:${saison_key}`).setLabel('Par parcours').setEmoji('🏆').setStyle(ButtonStyle.Primary);
+	  const saisonRow = new ActionRowBuilder().addComponents(btnCat, btnPts, btnTitre);
+
+	  return interaction.editReply({ embeds: [buildSaisonEmbed('cat')], components: [saisonRow] });
 	} finally {
 	  ss.close();
 	}
@@ -5262,6 +5300,210 @@ function buildProfilNavButtons(tmName) {
 		return interaction.editReply({ embeds: [buildH2HEmbed(r1[0], r2[0], h2h, stats1, stats2)] });
 	  });
 
+
+  // ── /saison : boutons de tri ─────────────────────────────────────────────
+  client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+    if (!interaction.customId.startsWith('saison_sort:')) return;
+
+    await interaction.deferUpdate();
+
+    if (!seasonDbReady)
+      return interaction.followUp({ embeds: [err('Save.db non disponible.')], ephemeral: true });
+
+    // customId : saison_sort:<mode>:<tmId>_<annee>
+    const parts    = interaction.customId.split(':');
+    const sortMode = parts[1];
+    const keyParts = parts[2].split('_');
+    const annee    = parseInt(keyParts.pop(), 10);
+    const tmId     = parseInt(keyParts.join('_'), 10);
+
+    if (!tmId || !annee)
+      return interaction.followUp({ embeds: [err('Paramètres invalides.')], ephemeral: true });
+
+    const ss = openSaveDb();
+    if (!ss) return interaction.followUp({ embeds: [err('Base de données non disponible.')], ephemeral: true });
+
+    try {
+      const tcCols     = ss.prepare('PRAGMA table_info(TournamentCategory)').all().map(c => c.name);
+      const hasTcName  = tcCols.includes('Name');
+      const catNameSel = hasTcName ? 'tc.Name AS CatName' : 'NULL AS CatName';
+
+      const results = ss.prepare(`
+        SELECT tr.TournamentId, tr.RoundReached, tr.EntryMode, tr.EntryRank,
+               tr.MoneyWon, tr.PointsMain,
+               t.Name AS TournName, t.CategoryId, ${catNameSel},
+               (
+                 SELECT tp2.Firstname || ' ' || tp2.Lastname
+                 FROM Match m
+                 JOIN TennisPlayer tp2 ON tp2.Id = CASE
+                   WHEN m.Player1Id = tr.PlayerId THEN m.Player2Id
+                   ELSE m.Player1Id
+                 END
+                 WHERE m.TournamentId = tr.TournamentId
+                   AND m.Year = tr.Year
+                   AND (m.Player1Id = tr.PlayerId OR m.Player2Id = tr.PlayerId)
+                   AND m.Outcome IN (2, 3)
+                 ORDER BY m.Date DESC LIMIT 1
+               ) AS OpponentName
+        FROM TournamentResult tr
+        JOIN Tournament t ON t.Id = tr.TournamentId
+        LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+        WHERE tr.PlayerId = ? AND tr.Year = ?
+        ORDER BY t.CategoryId ASC, tr.MoneyWon DESC
+      `).all(tmId, annee);
+
+      if (!results.length)
+        return interaction.followUp({ embeds: [err(`Aucun résultat pour la saison ${annee}.`)], ephemeral: true });
+
+      const pRow        = ss.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
+      const pDisplayName = pRow ? `${pRow.Firstname} ${pRow.Lastname}` : `Joueur #${tmId}`;
+
+      const rankEndRow = ss.prepare(`
+        SELECT Rank+1 AS Rank, Points FROM Ranking
+        WHERE PlayerId=? AND Circuit=0 AND strftime('%Y', Date, 'unixepoch')=?
+        ORDER BY Date DESC LIMIT 1
+      `).get(tmId, String(annee));
+      const rankJrEndRow = ss.prepare(`
+        SELECT Rank+1 AS Rank, Points FROM Ranking
+        WHERE PlayerId=? AND Circuit=1 AND strftime('%Y', Date, 'unixepoch')=?
+        ORDER BY Date DESC LIMIT 1
+      `).get(tmId, String(annee));
+      const raceRow = (() => {
+        try { return ss.prepare(`SELECT Rank+1 AS RaceRank, Points AS RacePoints FROM RaceRanking WHERE PlayerId=? AND Circuit=0 AND Year=? ORDER BY Year DESC LIMIT 1`).get(tmId, annee); }
+        catch { try { return ss.prepare(`SELECT RaceRank+1 AS RaceRank, Points AS RacePoints FROM RaceRanking WHERE PlayerId=? AND Circuit=0 AND Year=? ORDER BY Year DESC LIMIT 1`).get(tmId, annee); } catch { return null; } }
+      })();
+      const bilanRow   = ss.prepare(`SELECT SUM(MatchPlayed) AS played, SUM(MatchWon) AS won FROM TennisPlayerStatistics WHERE PlayerId=? AND Year=? AND Circuit=0`).get(tmId, annee);
+      const bilanJrRow = ss.prepare(`SELECT SUM(MatchPlayed) AS played, SUM(MatchWon) AS won FROM TennisPlayerStatistics WHERE PlayerId=? AND Year=? AND Circuit=1`).get(tmId, annee);
+
+      const totalPlayed = bilanRow?.played ?? 0;
+      const totalWon    = bilanRow?.won ?? 0;
+      const jrPlayed    = bilanJrRow?.played ?? 0;
+      const jrWon       = bilanJrRow?.won ?? 0;
+      const totalMoney  = results.reduce((sum, r) => sum + (r.MoneyWon ?? 0), 0);
+      const totalPts    = results.reduce((sum, r) => sum + (r.PointsMain ?? 0), 0);
+      const titles      = results.filter(r => r.RoundReached === -1).length;
+      const finals      = results.filter(r => r.RoundReached === 0).length;
+
+      const ROUND_LABEL_S = {
+        '-1': '🏆 Titre', '0': '🥈 Finale', '1': '🥉 Demi',
+        '2': '⚡ Quart', '3': '🎾 8ème', '4': '🎾 16ème',
+        '5': '🎾 32ème', '6': '🎾 64ème', '7': '🔸 Qualif.',
+        '8': '🔸 Qualif.', '9': '🔸 Qualif.',
+      };
+      const ENTRY_MODE_S = { 0: '', 1: 'WC', 2: 'Q', 3: 'LL', 4: 'Invité', 5: 'PR' };
+
+      const isJuniorResult = (r) =>
+        /junior|juniors/i.test(r.TournName ?? '') ||
+        /junior|juniors/i.test(r.CatName ?? '');
+
+      const atpResults    = results.filter(r => !isJuniorResult(r));
+      const juniorResults = results.filter(r =>  isJuniorResult(r));
+
+      const buildResultLines = (rows) => rows.map(r => {
+        const rawCat   = normalizeTournCat(r.CategoryId, r.TournName);
+        const effCat   = TOURN_CAT_SHORT[rawCat] ? rawCat : categFromPoints(rawCat, r.PointsMain, r.TournName);
+        const catEmoji = TOURN_CAT_EMOJI[effCat] ?? (isJuniorResult(r) ? '🎓' : '🎾');
+        const catShort = TOURN_CAT_SHORT[effCat] ?? (r.CatName ? r.CatName.slice(0, 10) : `Cat.${r.CategoryId}`);
+        const rrLabel  = ROUND_LABEL_S[String(r.RoundReached)] ?? `Tour ${r.RoundReached}`;
+        const entryTag = r.EntryMode && ENTRY_MODE_S[r.EntryMode] ? ` *(${ENTRY_MODE_S[r.EntryMode]})*` : '';
+        const money    = r.MoneyWon > 0 ? ` · 💵 ${r.MoneyWon.toLocaleString('fr-FR')} $` : '';
+        const pts      = r.PointsMain > 0 ? ` · 📊 ${r.PointsMain} pts` : '';
+        const oppStr   = r.OpponentName
+          ? (r.RoundReached === -1 ? ` *(bat ${r.OpponentName})*` : ` *(vs ${r.OpponentName})*`)
+          : '';
+        return `${catEmoji} **${r.TournName}** \`${catShort}\`${entryTag} → ${rrLabel}${oppStr}${money}${pts}`;
+      });
+
+      const rankLine = [
+        rankEndRow   ? `🏆 ATP **#${rankEndRow.Rank}** · ${(rankEndRow.Points ?? 0).toLocaleString()} pts` : null,
+        raceRow      ? `🏁 Race **#${raceRow.RaceRank}** · ${(raceRow.RacePoints ?? 0).toLocaleString()} pts` : null,
+        rankJrEndRow ? `🎓 Junior **#${rankJrEndRow.Rank}** · ${(rankJrEndRow.Points ?? 0).toLocaleString()} pts` : null,
+      ].filter(Boolean).join('  ·  ') || '_Classement non disponible_';
+
+      const bilanLine = [
+        totalPlayed > 0 ? `🏆 ATP **${totalWon}V/${totalPlayed - totalWon}D** (${pct(totalWon, totalPlayed)})` : null,
+        jrPlayed    > 0 ? `🎓 Junior **${jrWon}V/${jrPlayed - jrWon}D** (${pct(jrWon, jrPlayed)})` : null,
+      ].filter(Boolean).join('  ·  ') || '_Bilan non disponible_';
+
+      const descLines = [
+        rankLine,
+        bilanLine,
+        totalMoney > 0 ? `💵 Prize money total : **${totalMoney.toLocaleString('fr-FR')} $**` : null,
+        totalPts   > 0 ? `📊 Points ATP totaux : **${totalPts.toLocaleString()}**` : null,
+      ].filter(Boolean);
+
+      // ── Tri selon le mode ────────────────────────────────────────────────
+      let sortedAtp = [...atpResults];
+      let sortLabel = '';
+      if (sortMode === 'points') {
+        sortedAtp.sort((a, b) => (b.PointsMain ?? 0) - (a.PointsMain ?? 0));
+        sortLabel = ' · tri : 📊 points';
+      } else if (sortMode === 'titre') {
+        sortedAtp.sort((a, b) => {
+          const rA = a.RoundReached ?? 99;
+          const rB = b.RoundReached ?? 99;
+          if (rA !== rB) return rA - rB;
+          return (a.CategoryId ?? 99) - (b.CategoryId ?? 99);
+        });
+        sortLabel = ' · tri : 🏆 parcours';
+      } else {
+        sortedAtp.sort((a, b) => {
+          if ((a.CategoryId ?? 99) !== (b.CategoryId ?? 99)) return (a.CategoryId ?? 99) - (b.CategoryId ?? 99);
+          return (b.MoneyWon ?? 0) - (a.MoneyWon ?? 0);
+        });
+      }
+
+      const sortedAtpLines = buildResultLines(sortedAtp);
+      const sortedJrLines  = buildResultLines(juniorResults);
+
+      const embed = new EmbedBuilder()
+        .setColor(titles > 0 ? COLOR.gold : COLOR.tennis)
+        .setTitle(`📅 Saison ${annee} — ${pDisplayName}${sortLabel}`)
+        .setDescription(descLines.join('\n'))
+        .addFields(
+          { name: '🏆 Titres',   value: `**${titles}**`,         inline: true },
+          { name: '🥈 Finales',  value: `**${finals}**`,         inline: true },
+          { name: '🎾 Tournois', value: `**${results.length}**`, inline: true },
+        )
+        .setFooter({ text: `Tennis Manager 2026 · /saison` })
+        .setTimestamp();
+
+      if (sortedAtpLines.length > 0) {
+        let chunk = '', chunkIdx = 1;
+        const flushChunk = (label) => { if (chunk) embed.addFields({ name: label, value: chunk }); };
+        for (const line of sortedAtpLines) {
+          const next = chunk ? chunk + '\n' + line : line;
+          if (next.length > 1020) {
+            flushChunk(`🏆 Résultats ATP${sortedAtpLines.length > 20 ? ` — partie ${chunkIdx}` : ''}`);
+            chunk = line; chunkIdx++;
+          } else { chunk = next; }
+        }
+        flushChunk(`🏆 Résultats ATP${chunkIdx > 1 ? ` — partie ${chunkIdx}` : ''} (${sortedAtp.length})`);
+      }
+
+      if (sortedJrLines.length > 0) {
+        const jrFull = sortedJrLines.join('\n');
+        embed.addFields({ name: `🎓 Résultats Junior (${juniorResults.length})`, value: jrFull.length <= 1024 ? jrFull : jrFull.slice(0, 1021) + '…' });
+      }
+
+      // ── Boutons — bouton actif en Success ────────────────────────────────
+      const saison_key = `${tmId}_${annee}`;
+      const s = (mode) => mode === sortMode ? ButtonStyle.Success : ButtonStyle.Secondary;
+      const btnCat   = new ButtonBuilder().setCustomId(`saison_sort:cat:${saison_key}`).setLabel('Par catégorie').setEmoji('🎾').setStyle(s('cat'));
+      const btnPts   = new ButtonBuilder().setCustomId(`saison_sort:points:${saison_key}`).setLabel('Par points').setEmoji('📊').setStyle(s('points'));
+      const btnTitre = new ButtonBuilder().setCustomId(`saison_sort:titre:${saison_key}`).setLabel('Par parcours').setEmoji('🏆').setStyle(s('titre'));
+      const saisonRow = new ActionRowBuilder().addComponents(btnCat, btnPts, btnTitre);
+
+      return interaction.editReply({ embeds: [embed], components: [saisonRow] });
+
+    } catch (e) {
+      console.error('[saison_sort] Erreur:', e.message);
+      return interaction.followUp({ embeds: [err('Erreur lors du tri.')], ephemeral: true });
+    } finally {
+      ss.close();
+    }
+  });
 
 	  console.log('[Discord] Connexion en cours...');
 	  client.login(process.env.DISCORD_TOKEN).catch((e) => {
