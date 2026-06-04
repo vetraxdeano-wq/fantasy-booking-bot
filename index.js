@@ -3334,11 +3334,23 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 		WHERE PlayerId=? AND Circuit=1 AND strftime('%Y', Date, 'unixepoch')=?
 		ORDER BY Date DESC LIMIT 1
 	  `).get(tmId, String(annee));
-	  const raceRow = ss.prepare(`
-		SELECT RaceRank+1 AS RaceRank, Points AS RacePoints FROM RaceRanking
+	  const raceRow = (() => {
+	try {
+	  return ss.prepare(`
+		SELECT Rank+1 AS RaceRank, Points AS RacePoints FROM RaceRanking
 		WHERE PlayerId=? AND Circuit=0 AND Year=?
 		ORDER BY Year DESC LIMIT 1
 	  `).get(tmId, annee);
+	} catch {
+	  try {
+		return ss.prepare(`
+		  SELECT RaceRank+1 AS RaceRank, Points AS RacePoints FROM RaceRanking
+		  WHERE PlayerId=? AND Circuit=0 AND Year=?
+		  ORDER BY Year DESC LIMIT 1
+		`).get(tmId, annee);
+	  } catch { return null; }
+	}
+  })();
 
 	  const bilanRow = ss.prepare(`
 		SELECT SUM(MatchPlayed) AS played, SUM(MatchWon) AS won
