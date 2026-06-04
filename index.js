@@ -3373,6 +3373,20 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
         const simMap  = Object.fromEntries(simPlayers.map(p => [p.tm_player_id, p.ingame_name]));
         const ph      = simIds.map(() => '?').join(',');
 
+        // Exclusion des catégories Junior (même logique que le reste du bot)
+        const juniorCatIds = getJuniorCategoryIds(s);
+        const { clause: jExcl, ids: jIds } = buildJuniorExcludeClause(juniorCatIds);
+
+        // Vérifier si TournamentCategory a une colonne Circuit (TM2026)
+        const tcCols = s.prepare('PRAGMA table_info(TournamentCategory)').all().map(c => c.name);
+        const hasTcCircuit = tcCols.includes('Circuit');
+
+        // Filtre GC ATP : tc.Type=1 ET circuit non-junior (Circuit IS NULL ou Circuit=0)
+        // + fallback nom de tournoi pour les saves sans TournamentCategory correcte
+        const gcAtpCondition = hasTcCircuit
+          ? `((tc.Type = 1 AND (tc.Circuit IS NULL OR tc.Circuit = 0)) OR lower(t.Name) LIKE ?)`
+          : `(tc.Type = 1 OR lower(t.Name) LIKE ?)`;
+
         // Les 4 GC avec leur label et filtre SQL
         const GC_LIST = [
           { label: '🔴 Roland Garros',    like: '%roland%' },
@@ -3383,13 +3397,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
         const embed = new EmbedBuilder()
           .setColor(COLOR.gold)
-          .setTitle('🏆 Grand Chelem — Palmarès simulation')
-          .setFooter({ text: 'Tennis Manager 2026 · /tops gc · joueurs simulation uniquement' })
+          .setTitle('🏆 Grand Chelem ATP — Palmarès simulation')
+          .setFooter({ text: 'Tennis Manager 2026 · /tops gc · ATP uniquement · joueurs simulation' })
           .setTimestamp();
 
         let hasAny = false;
 
         for (const gc of GC_LIST) {
+          // Params : [gc.like, ...jIds (pour jExcl), ...simIds]
           const rows = s.prepare(`
             SELECT
               tp.Id AS tmId,
@@ -3404,13 +3419,14 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
             JOIN Tournament t    ON t.Id  = tr.TournamentId
             JOIN TennisPlayer tp ON tp.Id = tr.PlayerId
             LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-            WHERE (tc.Type = 1 OR lower(t.Name) LIKE ?)
+            WHERE ${gcAtpCondition}
+              AND ${jExcl}
               AND tp.Id IN (${ph})
             GROUP BY tr.PlayerId
             HAVING participations >= 1
             ORDER BY titres DESC, finales DESC, demis DESC, quarts DESC
             LIMIT 15
-          `).all(gc.like, ...simIds);
+          `).all(gc.like, ...jIds, ...simIds);
 
           if (!rows.length) continue;
           hasAny = true;
@@ -3430,9 +3446,17 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
         }
 
         if (!hasAny)
-          embed.setDescription('*Aucune donnée Grand Chelem disponible pour les joueurs de la simulation.*');
+          embed.setDescription('*Aucune donnée Grand Chelem ATP disponible pour les joueurs de la simulation.*');
 
-        return interaction.editReply({ embeds: [embed] });
+        // Bouton "Moi uniquement" — parcours GC par année du joueur lié
+        const gcBtn = new ButtonBuilder()
+          .setCustomId('topsgc_moi')
+          .setLabel('Moi uniquement')
+          .setEmoji('👤')
+          .setStyle(ButtonStyle.Secondary);
+        const gcRow = new ActionRowBuilder().addComponents(gcBtn);
+
+        return interaction.editReply({ embeds: [embed], components: [gcRow] });
       } finally { s.close(); }
     }
   }
@@ -4794,6 +4818,137 @@ function buildProfilNavButtons(tmName) {
 		  components: buildClassementComponents(page, rows.length),
 		});
 	  });
+
+  // ── Bouton "Moi uniquement" — parcours GC ATP par année ───────────────────
+  client.on('interactionCreate', async (interaction) => {
+    if (!interaction.isButton()) return;
+    if (interaction.customId !== 'topsgc_moi') return;
+
+    await interaction.deferReply({ ephemeral: true });
+
+    if (!seasonDbReady)
+      return interaction.editReply({ embeds: [err('Save.db non disponible.')] });
+
+    const player = await db.get(interaction.user.id);
+    if (!player?.tm_player_id)
+      return interaction.editReply({ embeds: [err('Tu n\'as pas de joueur lié. Utilise `/creer-joueur` d\'abord.')] });
+
+    const tmId = player.tm_player_id;
+    const s = openSaveDb();
+    if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
+    try {
+      const pRow = s.prepare('SELECT Firstname, Lastname FROM TennisPlayer WHERE Id=?').get(tmId);
+      const pName = pRow ? `${pRow.Firstname} ${pRow.Lastname}` : player.ingame_name ?? `Joueur #${tmId}`;
+
+      // Exclusion junior (même logique que le reste du bot)
+      const juniorCatIds = getJuniorCategoryIds(s);
+      const { clause: jExcl, ids: jIds } = buildJuniorExcludeClause(juniorCatIds);
+
+      const tcCols = s.prepare('PRAGMA table_info(TournamentCategory)').all().map(c => c.name);
+      const hasTcCircuit = tcCols.includes('Circuit');
+      const gcAtpCondition = hasTcCircuit
+        ? `((tc.Type = 1 AND (tc.Circuit IS NULL OR tc.Circuit = 0)) OR (lower(t.Name) LIKE '%australian open%' OR lower(t.Name) LIKE '%roland garros%' OR lower(t.Name) LIKE '%wimbledon%' OR lower(t.Name) LIKE '%us open%'))`
+        : `(tc.Type = 1 OR lower(t.Name) LIKE '%australian open%' OR lower(t.Name) LIKE '%roland garros%' OR lower(t.Name) LIKE '%wimbledon%' OR lower(t.Name) LIKE '%us open%')`;
+
+      // Parcours GC ATP par année
+      const rows = s.prepare(`
+        SELECT
+          tr.Year,
+          t.Name AS TournName,
+          tr.RoundReached
+        FROM TournamentResult tr
+        JOIN Tournament t    ON t.Id = tr.TournamentId
+        LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+        WHERE tr.PlayerId = ?
+          AND ${gcAtpCondition}
+          AND ${jExcl}
+        ORDER BY tr.Year ASC, t.Name ASC
+      `).all(tmId, ...jIds);
+
+      const GC_ROUND_LABEL = {
+        '-1': '🏆 Vainqueur',
+         '0': '🥈 Finaliste',
+         '1': '🎯 1/2',
+         '2': '🔹 1/4',
+         '3': '⚙️ 1/8',
+         '4': '⚙️ 1/16',
+         '5': '⚙️ 1/32',
+         '6': '⚙️ 1/64',
+         '7': '⚙️ 1/128',
+      };
+      const GC_SHORT_NAME = {
+        'australian': '🟡 AO',
+        'roland':     '🔴 RG',
+        'wimbledon':  '🟢 WIM',
+        'us open':    '🔵 USO',
+      };
+      function gcShort(name) {
+        const n = name.toLowerCase();
+        for (const [k, v] of Object.entries(GC_SHORT_NAME)) {
+          if (n.includes(k)) return v;
+        }
+        return name.slice(0, 12);
+      }
+
+      if (!rows.length) {
+        return interaction.editReply({ embeds: [
+          new EmbedBuilder()
+            .setColor(COLOR.tennis)
+            .setTitle(`👤 ${player.ingame_name} — Parcours GC ATP`)
+            .setDescription('*Aucune participation en Grand Chelem ATP trouvée.*')
+            .setFooter({ text: 'Tennis Manager 2026 · /tops gc' })
+        ]});
+      }
+
+      // Grouper par année
+      const byYear = {};
+      for (const r of rows) {
+        if (!byYear[r.Year]) byYear[r.Year] = [];
+        byYear[r.Year].push(r);
+      }
+
+      const GC_ORDER = ['australian', 'roland', 'wimbledon', 'us open'];
+      const lines = [];
+      for (const year of Object.keys(byYear).sort((a, b) => Number(a) - Number(b))) {
+        const entries = byYear[year];
+        entries.sort((a, b) => {
+          const ia = GC_ORDER.findIndex(k => a.TournName.toLowerCase().includes(k));
+          const ib = GC_ORDER.findIndex(k => b.TournName.toLowerCase().includes(k));
+          return (ia === -1 ? 99 : ia) - (ib === -1 ? 99 : ib);
+        });
+        const parts = entries.map(r => {
+          const rnd = GC_ROUND_LABEL[String(r.RoundReached)] ?? `Tour ${r.RoundReached}`;
+          return `${gcShort(r.TournName)} → ${rnd}`;
+        });
+        lines.push(`**${year}** · ${parts.join('  |  ')}`);
+      }
+
+      // Récap
+      const totalPart = rows.length;
+      const titresGC  = rows.filter(r => r.RoundReached === -1).length;
+      const finalesGC = rows.filter(r => r.RoundReached ===  0).length;
+      const demisGC   = rows.filter(r => r.RoundReached ===  1).length;
+      const recapParts = [];
+      if (titresGC  > 0) recapParts.push(`🏆 ${titresGC} titre${titresGC > 1 ? 's' : ''}`);
+      if (finalesGC > 0) recapParts.push(`🥈 ${finalesGC} finale${finalesGC > 1 ? 's' : ''}`);
+      if (demisGC   > 0) recapParts.push(`🎯 ${demisGC} demi${demisGC > 1 ? 's' : ''}`);
+      recapParts.push(`🎟️ ${totalPart} participation${totalPart > 1 ? 's' : ''}`);
+
+      const fullText = lines.join('\n');
+      const embed = new EmbedBuilder()
+        .setColor(titresGC > 0 ? COLOR.gold : COLOR.tennis)
+        .setTitle(`👤 ${player.ingame_name} (${pName}) — Parcours GC ATP`)
+        .setDescription(recapParts.join('  ·  '))
+        .addFields({ name: '📅 Historique par année', value: fullText.length <= 1024 ? fullText : fullText.slice(0, 1021) + '…' })
+        .setFooter({ text: 'Tennis Manager 2026 · /tops gc · ATP uniquement' })
+        .setTimestamp();
+
+      return interaction.editReply({ embeds: [embed] });
+    } catch (e) {
+      console.error('[topsgc_moi] Erreur:', e.message);
+      return interaction.editReply({ embeds: [err('Erreur lors du calcul du parcours GC.')] });
+    } finally { s.close(); }
+  });
 
   // ── Boutons tri Power Ranking ──────────────────────────────────────────────
   client.on('interactionCreate', async (interaction) => {
