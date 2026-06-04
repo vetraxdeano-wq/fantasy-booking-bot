@@ -3288,21 +3288,35 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
       const s = openSaveDb();
       if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
       try {
+        // Récupérer les tm_player_id des joueurs de la simulation
+        const { data: simPlayers } = await supabase
+          .from('players')
+          .select('tm_player_id, ingame_name')
+          .not('tm_player_id', 'is', null);
+
+        if (!simPlayers || !simPlayers.length)
+          return interaction.editReply({ embeds: [err('Aucun joueur de la simulation trouvé.')] });
+
+        const simIds = simPlayers.map(p => p.tm_player_id);
+        const simMap = Object.fromEntries(simPlayers.map(p => [p.tm_player_id, p.ingame_name]));
+        const placeholders = simIds.map(() => '?').join(',');
+
         // Surfaces à afficher : soit la surface demandée, soit toutes
         const surfaces = surfFilter ? [surfFilter] : [1, 2, 3, 4];
 
         const embed = new EmbedBuilder()
           .setColor(COLOR.tennis)
           .setTitle(surfFilter
-            ? `🎾 Top joueurs — ${SURFACE_LABEL[surfFilter] ?? `Surface ${surfFilter}`}`
-            : '🎾 Top joueurs par surface')
-          .setFooter({ text: 'Tennis Manager 2026 · /tops surface · min. 10 matchs' })
+            ? `🎾 Top simulation — ${SURFACE_LABEL[surfFilter] ?? `Surface ${surfFilter}`}`
+            : '🎾 Top simulation par surface')
+          .setFooter({ text: 'Tennis Manager 2026 · /tops surface · min. 10 matchs · joueurs simulation uniquement' })
           .setTimestamp();
 
         let hasAny = false;
         for (const surf of surfaces) {
           const rows = s.prepare(`
             SELECT
+              tp.Id AS tmId,
               tp.Firstname || ' ' || tp.Lastname AS name,
               tp.Country,
               SUM(tps.MatchPlayed) AS played,
@@ -3311,19 +3325,21 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
             JOIN TennisPlayer tp ON tp.Id = tps.PlayerId
             WHERE tps.Circuit = 0
               AND tps.Surface = ?
+              AND tp.Id IN (${placeholders})
             GROUP BY tps.PlayerId
             HAVING played >= 10
             ORDER BY (CAST(won AS REAL) / played) DESC
             LIMIT 10
-          `).all(surf);
+          `).all(surf, ...simIds);
 
           if (!rows.length) continue;
           hasAny = true;
 
           const lines = rows.map((r, i) => {
-            const wr  = pct(r.won, r.played);
-            const pos = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`${i + 1}.\``;
-            return `${pos} **${r.name}** (${r.Country ?? '??'}) — **${r.won}V/${r.played - r.won}D** (${wr})`;
+            const wr       = pct(r.won, r.played);
+            const pos      = `\`${i + 1}.\``;
+            const dispName = simMap[r.tmId] ?? r.name;
+            return `${pos} **${dispName}** (${r.Country ?? '??'}) — **${r.won}V** / ${r.played - r.won}D — ${wr}`;
           }).join('\n');
 
           embed.addFields({
@@ -3333,7 +3349,7 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
         }
 
         if (!hasAny)
-          embed.setDescription('*Aucune donnée de surface disponible (min. 10 matchs).*');
+          embed.setDescription('*Aucune donnée disponible (min. 10 matchs) pour les joueurs de la simulation.*');
 
         return interaction.editReply({ embeds: [embed] });
       } finally { s.close(); }
@@ -3344,74 +3360,77 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
       const s = openSaveDb();
       if (!s) return interaction.editReply({ embeds: [err('Base de données non disponible.')] });
       try {
-        // Identifier les catégories GC (type=1 ou nom contenant "grand chelem")
-        const gcRows = s.prepare(`
-          SELECT
-            tp.Firstname || ' ' || tp.Lastname AS name,
-            tp.Country,
-            COUNT(CASE WHEN tr.RoundReached = -1 THEN 1 END) AS titres,
-            COUNT(CASE WHEN tr.RoundReached =  0 THEN 1 END) AS finales,
-            COUNT(CASE WHEN tr.RoundReached =  1 THEN 1 END) AS demis,
-            COUNT(CASE WHEN tr.RoundReached =  2 THEN 1 END) AS quarts,
-            MIN(tr.RoundReached)                              AS bestRound,
-            COUNT(*) AS participations
-          FROM TournamentResult tr
-          JOIN Tournament t  ON t.Id  = tr.TournamentId
-          JOIN TennisPlayer tp ON tp.Id = tr.PlayerId
-          LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
-          WHERE (tc.Type = 1
-             OR (tc.Type IS NULL AND lower(t.Name) LIKE '%grand chelem%')
-             OR (tc.Type IS NULL AND (
-                  lower(t.Name) LIKE '%roland%'
-               OR lower(t.Name) LIKE '%wimbledon%'
-               OR lower(t.Name) LIKE '%us open%'
-               OR lower(t.Name) LIKE '%australian%'
-             )))
-          GROUP BY tr.PlayerId
-          HAVING participations >= 1
-          ORDER BY titres DESC, finales DESC, demis DESC, quarts DESC
-          LIMIT 20
-        `).all();
+        // Récupérer les tm_player_id des joueurs de la simulation
+        const { data: simPlayers } = await supabase
+          .from('players')
+          .select('tm_player_id, ingame_name')
+          .not('tm_player_id', 'is', null);
+
+        if (!simPlayers || !simPlayers.length)
+          return interaction.editReply({ embeds: [err('Aucun joueur de la simulation trouvé.')] });
+
+        const simIds  = simPlayers.map(p => p.tm_player_id);
+        const simMap  = Object.fromEntries(simPlayers.map(p => [p.tm_player_id, p.ingame_name]));
+        const ph      = simIds.map(() => '?').join(',');
+
+        // Les 4 GC avec leur label et filtre SQL
+        const GC_LIST = [
+          { label: '🔴 Roland Garros',    like: '%roland%' },
+          { label: '🟢 Wimbledon',         like: '%wimbledon%' },
+          { label: '🔵 US Open',           like: '%us open%' },
+          { label: '🟡 Australian Open',   like: '%australian%' },
+        ];
 
         const embed = new EmbedBuilder()
           .setColor(COLOR.gold)
-          .setTitle('🏆 Meilleurs résultats en Grand Chelem')
-          .setFooter({ text: 'Tennis Manager 2026 · /tops gc' })
+          .setTitle('🏆 Grand Chelem — Palmarès simulation')
+          .setFooter({ text: 'Tennis Manager 2026 · /tops gc · joueurs simulation uniquement' })
           .setTimestamp();
 
-        if (!gcRows.length) {
-          embed.setDescription('*Aucune donnée Grand Chelem disponible.*');
-          return interaction.editReply({ embeds: [embed] });
-        }
+        let hasAny = false;
 
-        // Séparer les titrés et les non-titrés
-        const titrés  = gcRows.filter(r => r.titres > 0);
-        const autresGC = gcRows.filter(r => r.titres === 0);
+        for (const gc of GC_LIST) {
+          const rows = s.prepare(`
+            SELECT
+              tp.Id AS tmId,
+              tp.Firstname || ' ' || tp.Lastname AS name,
+              tp.Country,
+              COUNT(CASE WHEN tr.RoundReached = -1 THEN 1 END) AS titres,
+              COUNT(CASE WHEN tr.RoundReached =  0 THEN 1 END) AS finales,
+              COUNT(CASE WHEN tr.RoundReached =  1 THEN 1 END) AS demis,
+              COUNT(CASE WHEN tr.RoundReached =  2 THEN 1 END) AS quarts,
+              COUNT(*) AS participations
+            FROM TournamentResult tr
+            JOIN Tournament t    ON t.Id  = tr.TournamentId
+            JOIN TennisPlayer tp ON tp.Id = tr.PlayerId
+            LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
+            WHERE (tc.Type = 1 OR lower(t.Name) LIKE ?)
+              AND tp.Id IN (${ph})
+            GROUP BY tr.PlayerId
+            HAVING participations >= 1
+            ORDER BY titres DESC, finales DESC, demis DESC, quarts DESC
+            LIMIT 15
+          `).all(gc.like, ...simIds);
 
-        const roundStr = (r) => {
-          const best = ROUND_LABEL[String(r.bestRound)] ?? `Tour ${r.bestRound}`;
-          const parts = [];
-          if (r.titres  > 0) parts.push(`🏆 ×${r.titres}`);
-          if (r.finales > 0) parts.push(`🥈 ×${r.finales}`);
-          if (r.demis   > 0) parts.push(`🥉 ×${r.demis}`);
-          if (r.quarts  > 0) parts.push(`⚡ ×${r.quarts}`);
-          return `${parts.join('  ')}${parts.length ? '  ·  ' : ''}Meilleur : **${best}** · ${r.participations} part.`;
-        };
+          if (!rows.length) continue;
+          hasAny = true;
 
-        if (titrés.length) {
-          const lines = titrés.map((r, i) => {
-            const pos = i === 0 ? '🥇' : i === 1 ? '🥈' : i === 2 ? '🥉' : `\`${i + 1}.\``;
-            return `${pos} **${r.name}** (${r.Country ?? '??'}) — ${roundStr(r)}`;
+          const lines = rows.map((r, i) => {
+            const dispName = simMap[r.tmId] ?? r.name;
+            const parts = [];
+            if (r.titres  > 0) parts.push(`${r.titres} titre${r.titres > 1 ? 's' : ''}`);
+            if (r.finales > 0) parts.push(`${r.finales} finale${r.finales > 1 ? 's' : ''}`);
+            if (r.demis   > 0) parts.push(`${r.demis} demi${r.demis > 1 ? 's' : ''}`);
+            if (r.quarts  > 0) parts.push(`${r.quarts} quart${r.quarts > 1 ? 's' : ''}`);
+            const detail = parts.join(' · ') || 'Participations';
+            return `\`${i + 1}.\` **${dispName}** (${r.Country ?? '??'}) — ${detail} *(${r.participations} part.)*`;
           }).join('\n');
-          embed.addFields({ name: `🏆 Palmarès GC — ${titrés.length} joueur${titrés.length > 1 ? 's' : ''} titré${titrés.length > 1 ? 's' : ''}`, value: lines.slice(0, 1024) });
+
+          embed.addFields({ name: gc.label, value: lines.slice(0, 1024) });
         }
 
-        if (autresGC.length) {
-          const lines = autresGC.slice(0, 10).map((r, i) => {
-            return `\`${i + 1}.\` **${r.name}** (${r.Country ?? '??'}) — ${roundStr(r)}`;
-          }).join('\n');
-          embed.addFields({ name: '🎾 Meilleurs parcours sans titre', value: lines.slice(0, 1024) });
-        }
+        if (!hasAny)
+          embed.setDescription('*Aucune donnée Grand Chelem disponible pour les joueurs de la simulation.*');
 
         return interaction.editReply({ embeds: [embed] });
       } finally { s.close(); }
