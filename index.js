@@ -3306,7 +3306,20 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 	  const results = ss.prepare(`
 		SELECT tr.TournamentId, tr.RoundReached, tr.EntryMode, tr.EntryRank,
 		       tr.MoneyWon, tr.PointsMain,
-		       t.Name AS TournName, t.CategoryId, ${catNameSel}
+		       t.Name AS TournName, t.CategoryId, ${catNameSel},
+		       (
+		         SELECT tp2.Firstname || ' ' || tp2.Lastname
+		         FROM Match m
+		         JOIN TennisPlayer tp2 ON tp2.Id = CASE
+		           WHEN m.Player1Id = tr.PlayerId THEN m.Player2Id
+		           ELSE m.Player1Id
+		         END
+		         WHERE m.TournamentId = tr.TournamentId
+		           AND m.Year = tr.Year
+		           AND (m.Player1Id = tr.PlayerId OR m.Player2Id = tr.PlayerId)
+		           AND m.Outcome IN (2, 3)
+		         ORDER BY m.Date DESC LIMIT 1
+		       ) AS OpponentName
 		FROM TournamentResult tr
 		JOIN Tournament t ON t.Id = tr.TournamentId
 		LEFT JOIN TournamentCategory tc ON tc.Id = t.CategoryId
@@ -3388,13 +3401,17 @@ setInterval(keepAlive, 10 * 60 * 1000); // toutes les 10 min
 
 	  const buildResultLines = (rows) => rows.map(r => {
 		const rawCat   = normalizeTournCat(r.CategoryId, r.TournName);
-		const catEmoji = TOURN_CAT_EMOJI[rawCat] ?? (isJuniorResult(r) ? '🎓' : '🎾');
-		const catShort = TOURN_CAT_SHORT[rawCat] ?? (r.CatName ? r.CatName.slice(0, 10) : `Cat.${r.CategoryId}`);
+		const effCat   = TOURN_CAT_SHORT[rawCat] ? rawCat : categFromPoints(rawCat, r.PointsMain, r.TournName);
+		const catEmoji = TOURN_CAT_EMOJI[effCat] ?? (isJuniorResult(r) ? '🎓' : '🎾');
+		const catShort = TOURN_CAT_SHORT[effCat] ?? (r.CatName ? r.CatName.slice(0, 10) : `Cat.${r.CategoryId}`);
 		const rrLabel  = ROUND_LABEL_S[String(r.RoundReached)] ?? `Tour ${r.RoundReached}`;
 		const entryTag = r.EntryMode && ENTRY_MODE_S[r.EntryMode] ? ` *(${ENTRY_MODE_S[r.EntryMode]})*` : '';
 		const money    = r.MoneyWon > 0 ? ` · 💵 ${r.MoneyWon.toLocaleString('fr-FR')} $` : '';
 		const pts      = r.PointsMain > 0 ? ` · 📊 ${r.PointsMain} pts` : '';
-		return `${catEmoji} **${r.TournName}** \`${catShort}\`${entryTag} → ${rrLabel}${money}${pts}`;
+		const oppStr   = r.OpponentName
+		  ? (r.RoundReached === -1 ? ` *(bat ${r.OpponentName})*` : ` *(vs ${r.OpponentName})*`)
+		  : '';
+		return `${catEmoji} **${r.TournName}** \`${catShort}\`${entryTag} → ${rrLabel}${oppStr}${money}${pts}`;
 	  });
 
 	  const atpLines    = buildResultLines(atpResults);
